@@ -1,0 +1,256 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VO2 Step Test Export Schemas",
+  "description": "JSON schemas for data exports from the VO2 Step Testing Dash application",
+  
+  "definitions": {
+    "stepTestData": {
+      "type": "object",
+      "title": "Step Test Data Export",
+      "description": "Schema for the step-by-step test data export (form_submission.csv)",
+      "properties": {
+        "step_no": {
+          "type": ["number", "null"],
+          "description": "Step number in the test sequence"
+        },
+        "Type": {
+          "type": ["string", "null"],
+          "enum": ["Submax", "Max", null],
+          "description": "Type of step: Submaximal or Maximal"
+        },
+        "T_PO": {
+          "type": ["number", "null"],
+          "description": "Target Power Output in watts",
+          "minimum": 0
+        },
+        "A_PO": {
+          "type": ["number", "null"],
+          "description": "Actual Power Output in watts",
+          "minimum": 0
+        },
+        "HR": {
+          "type": ["number", "null"],
+          "description": "Heart Rate in beats per minute",
+          "minimum": 0
+        },
+        "La": {
+          "type": ["number", "null"],
+          "description": "Blood Lactate in mmol/L",
+          "minimum": 0
+        },
+        "V02": {
+          "type": ["number", "null"],
+          "description": "VO2 measurement",
+          "minimum": 0
+        },
+        "rate": {
+          "type": ["number", "null"],
+          "description": "Stroke/cadence rate in strokes per minute",
+          "minimum": 0
+        },
+        "split": {
+          "type": ["number", "null"],
+          "description": "Computed split time in seconds per 500m",
+          "minimum": 0
+        },
+        "rpe": {
+          "type": ["number", "null"],
+          "description": "Rate of Perceived Exertion",
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "required": []
+    },
+    
+    "stepTestDataArray": {
+      "type": "array",
+      "title": "Step Test Data Collection",
+      "description": "Array of step test records",
+      "items": {
+        "$ref": "#/definitions/stepTestData"
+      }
+    },
+    
+    "hrTrainingZone": {
+      "type": "object",
+      "title": "HR Training Zone",
+      "description": "Schema for a single heart rate training zone (HR_Training_Zones.csv)",
+      "properties": {
+        "Zone": {
+          "type": "string",
+          "enum": ["Z1", "Z2", "Z3", "Z4", "Z5"],
+          "description": "Training zone identifier"
+        },
+        "HR_low": {
+          "type": ["number", "null"],
+          "description": "Lower bound of heart rate for this zone in bpm",
+          "minimum": 0
+        },
+        "HR_high": {
+          "type": ["number", "null"],
+          "description": "Upper bound of heart rate for this zone in bpm",
+          "minimum": 0
+        },
+        "PO_low": {
+          "type": ["number", "null"],
+          "description": "Lower bound of power output for this zone in watts",
+          "minimum": 0
+        },
+        "PO_high": {
+          "type": ["number", "null"],
+          "description": "Upper bound of power output for this zone in watts",
+          "minimum": 0
+        },
+        "Split_low": {
+          "type": ["string", "null"],
+          "description": "Lower bound split time in mm:ss.ms format (e.g., '1:52.34')",
+          "pattern": "^\\d+:\\d{2}\\.\\d{2}$"
+        },
+        "Split_high": {
+          "type": ["string", "null"],
+          "description": "Upper bound split time in mm:ss.ms format (e.g., '1:52.34')",
+          "pattern": "^\\d+:\\d{2}\\.\\d{2}$"
+        },
+        "Rate_low": {
+          "type": ["number", "null"],
+          "description": "Lower bound stroke rate for this zone in strokes per minute",
+          "minimum": 0
+        },
+        "Rate_high": {
+          "type": ["number", "null"],
+          "description": "Upper bound stroke rate for this zone in strokes per minute",
+          "minimum": 0
+        },
+        "Notes": {
+          "type": "string",
+          "description": "Additional notes or description for the zone (e.g., 'Easy / recovery', 'LT1≈2.0 mmol (HR≈145)')"
+        }
+      },
+      "required": ["Zone", "Notes"]
+    },
+    
+    "hrTrainingZonesArray": {
+      "type": "array",
+      "title": "HR Training Zones Collection",
+      "description": "Array of 5 heart rate training zones",
+      "items": {
+        "$ref": "#/definitions/hrTrainingZone"
+      },
+      "minItems": 5,
+      "maxItems": 5
+    },
+    
+    "warehouseRecord": {
+      "type": "object",
+      "title": "Warehouse Ingest Record",
+      "description": "Schema for records submitted to the warehouse API",
+      "properties": {
+        "profile_id": {
+          "type": "integer",
+          "description": "ID of the athlete profile"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Unique session identifier (profile_id + timestamp)",
+          "pattern": "^\\d+_\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}$"
+        },
+        "session_ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session timestamp in ISO format"
+        },
+        "body_mass_kg": {
+          "type": ["number", "null"],
+          "description": "Body mass in kilograms",
+          "minimum": 0
+        },
+        "test_type": {
+          "type": "string",
+          "enum": ["erg_C2", "erg_RP3", "row", "bike", "other"],
+          "description": "Type of test equipment/modality"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["Max", "Submax"],
+          "description": "Test mode: Maximal or Submaximal"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Free-text notes about the session"
+        },
+        "step_no": {
+          "type": ["number", "null"],
+          "description": "Step number in the test sequence"
+        },
+        "step_type": {
+          "type": ["string", "null"],
+          "enum": ["Submax", "Max", null],
+          "description": "Type of step: Submaximal or Maximal"
+        },
+        "target_po_w": {
+          "type": ["number", "null"],
+          "description": "Target power output in watts",
+          "minimum": 0
+        },
+        "actual_po_w": {
+          "type": ["number", "null"],
+          "description": "Actual power output in watts",
+          "minimum": 0
+        },
+        "hr_bpm": {
+          "type": ["number", "null"],
+          "description": "Heart rate in beats per minute",
+          "minimum": 0
+        },
+        "lactate_mmol": {
+          "type": ["number", "null"],
+          "description": "Blood lactate in mmol/L",
+          "minimum": 0
+        },
+        "vo2": {
+          "type": ["number", "null"],
+          "description": "VO2 measurement",
+          "minimum": 0
+        },
+        "rate_spm": {
+          "type": ["number", "null"],
+          "description": "Stroke/cadence rate in strokes per minute",
+          "minimum": 0
+        },
+        "split_sec_per_500": {
+          "type": ["number", "null"],
+          "description": "Split time in seconds per 500m",
+          "minimum": 0
+        },
+        "rpe": {
+          "type": ["number", "null"],
+          "description": "Rate of Perceived Exertion",
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "required": [
+        "profile_id",
+        "session_id",
+        "session_ts",
+        "test_type",
+        "mode",
+        "notes"
+      ]
+    }
+  },
+  
+  "oneOf": [
+    {
+      "title": "Step Test Data Export",
+      "description": "Use this schema for form_submission.csv exports",
+      "$ref": "#/definitions/stepTestDataArray"
+    },
+    {
+      "title": "HR Training Zones Export",
+      "description": "Use this schema for HR_Training_Zones.csv exports",
+      "$ref": "#/definitions/hrTrainingZonesArray"
+    }
+  ]
+}
