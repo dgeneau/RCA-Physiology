@@ -1,0 +1,150 @@
+{\rtf1\ansi\deff0
+{\fonttbl{\f0\fswiss Arial;}{\f1\fmodern Courier New;}}
+{\colortbl;\red0\green0\blue0;\red0\green0\blue255;\red128\green128\blue128;}
+
+{\*\generator Claude AI;}
+
+\f0\fs28\b VO2 Step Test Data Source Specification\b0\fs20\par
+\par
+
+\b Document Purpose\b0\par
+This document defines the data source specification for ingesting VO2 step test data into the warehouse system.\par
+\par
+
+\b Source Information\b0\par
+\line Source Name: VO2 Step Testing\par
+\line Source Type: Manual Data Entry (Dash Application)\par
+\line Data Category: Performance Testing\par
+\line Update Frequency: Per testing session\par
+\par
+
+\b Data Structure\b0\par
+\par
+
+\b Record Schema\b0\par
+Each record represents one step in a VO2 step test and contains the following fields:\par
+\par
+
+\f1\fs18
+\{
+  "profile_id": integer (required),
+  "session_id": string (required),
+  "session_ts": string (required, ISO 8601 datetime),
+  "body_mass_kg": number (optional),
+  "test_type": string (required, enum),
+  "mode": string (required, enum),
+  "notes": string (required),
+  "step_no": number (optional),
+  "step_type": string (optional, enum),
+  "target_po_w": number (optional),
+  "actual_po_w": number (optional),
+  "hr_bpm": number (optional),
+  "lactate_mmol": number (optional),
+  "vo2": number (optional),
+  "rate_spm": number (optional),
+  "split_sec_per_500": number (optional),
+  "rpe": number (optional)
+\}
+\f0\fs20\par
+\par
+
+\b Field Definitions\b0\par
+\par
+
+\i Session-Level Fields:\i0\par
+\line • \b profile_id\b0: Unique identifier for the athlete (integer)\par
+\line • \b session_id\b0: Unique session identifier formatted as "profile_id_timestamp"\par
+\line • \b session_ts\b0: Timestamp of the testing session (ISO 8601 format)\par
+\line • \b body_mass_kg\b0: Athlete body mass in kilograms (decimal)\par
+\line • \b test_type\b0: Equipment/modality type\par
+\line   - Valid values: "erg_C2", "erg_RP3", "row", "bike", "other"\par
+\line • \b mode\b0: Test intensity mode\par
+\line   - Valid values: "Max", "Submax"\par
+\line • \b notes\b0: Free-text notes about the session (string)\par
+\par
+
+\i Step-Level Fields:\i0\par
+\line • \b step_no\b0: Sequential step number in the test (integer)\par
+\line • \b step_type\b0: Type of step\par
+\line   - Valid values: "Submax", "Max"\par
+\line • \b target_po_w\b0: Target power output in watts (decimal)\par
+\line • \b actual_po_w\b0: Actual measured power output in watts (decimal)\par
+\line • \b hr_bpm\b0: Heart rate in beats per minute (decimal)\par
+\line • \b lactate_mmol\b0: Blood lactate concentration in mmol/L (decimal)\par
+\line • \b vo2\b0: VO2 measurement (decimal)\par
+\line • \b rate_spm\b0: Stroke/cadence rate in strokes per minute (decimal)\par
+\line • \b split_sec_per_500\b0: Computed split time in seconds per 500m (decimal)\par
+\line • \b rpe\b0: Rate of Perceived Exertion, scale 0-10 (decimal)\par
+\par
+
+\b Data Quality Rules\b0\par
+\par
+1. At least one step-level measurement field must be populated per record\par
+2. All session-level fields are repeated for each step in the same session\par
+3. Numeric fields cannot be negative\par
+4. RPE values must be between 0 and 10\par
+5. Empty/null values are permitted for optional fields\par
+\par
+
+\b Subject Identification\b0\par
+\line Subject Field: \b profile_id\b0\par
+\line This field links records to individual athletes in the system.\par
+\par
+
+\b Ingestion Method\b0\par
+\line API Endpoint: WarehouseClient.ingest_raw()\par
+\line Validation: Client-side validation disabled (validate_client_side=False)\par
+\line Batch Processing: Multiple steps submitted as array of records\par
+\par
+
+\b Example Record\b0\par
+\par
+\f1\fs18
+\{
+  "profile_id": 12345,
+  "session_id": "12345_2025-02-04T14:30:00",
+  "session_ts": "2025-02-04T14:30:00",
+  "body_mass_kg": 75.5,
+  "test_type": "erg_C2",
+  "mode": "Submax",
+  "notes": "Baseline testing",
+  "step_no": 1,
+  "step_type": "Submax",
+  "target_po_w": 150,
+  "actual_po_w": 148,
+  "hr_bpm": 135,
+  "lactate_mmol": 1.8,
+  "vo2": null,
+  "rate_spm": 22,
+  "split_sec_per_500": 112.34,
+  "rpe": 3
+\}
+\f0\fs20\par
+\par
+
+\b Derived Data Products\b0\par
+\par
+The following outputs are derived from this data:\par
+\par
+1. \b Training Zone Calculations\b0\par
+   - 5-zone model based on lactate thresholds\par
+   - Fixed lactate markers: LT1=2.0 mmol, LT2=4.0 mmol, LT3=6.0 mmol\par
+   - HR interpolation at threshold lactate values\par
+   - PO and rate interpolated from HR\par
+\par
+2. \b Performance Metrics\b0\par
+   - HR-Power relationship (linear regression)\par
+   - Lactate-Power relationship (polynomial fit)\par
+   - Efficiency metrics\par
+\par
+
+\b Data Retention\b0\par
+\line Raw records are retained indefinitely for historical analysis and trend tracking.\par
+\par
+
+\b Version History\b0\par
+\line Version 1.0 - Initial specification\par
+\line Date: February 4, 2026\par
+\line Author: System Administrator\par
+\par
+}
