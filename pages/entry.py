@@ -346,6 +346,33 @@ def format_split_mmss(split_seconds):
     seconds = total_seconds % 60
     return f"{minutes}:{seconds:05.2f}"
 
+def _interp_at_lactate(df, y_col, la_target):
+    """
+    Interpolate y_col at a given lactate value using La -> y_col.
+    Clamps outside range to endpoints.
+    """
+    if df is None or df.empty or la_target is None:
+        return None
+
+    d = df.copy()
+    d["La"] = pd.to_numeric(d.get("La"), errors="coerce")
+    d[y_col] = pd.to_numeric(d.get(y_col), errors="coerce")
+    d = d.dropna(subset=["La", y_col])
+    if len(d) < 2:
+        return None
+
+    d = d.groupby("La", as_index=False)[y_col].mean().sort_values("La")
+    la = d["La"].to_numpy(float)
+    y = d[y_col].to_numpy(float)
+
+    if la_target <= la.min():
+        return float(y[0])
+    if la_target >= la.max():
+        return float(y[-1])
+
+    return float(np.interp(float(la_target), la, y))
+
+
 
 layout = dbc.Container(
     [
@@ -382,6 +409,21 @@ layout = dbc.Container(
                                                 min = 0, 
                                                 step = 0.1,
                                                 placeholder=0.0,
+                                                value=None,
+                                            ),
+                                        ],
+                                        md=6,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Max HR (bpm)"),
+                                            dbc.Input(
+                                                id="form-max-hr",
+                                                type="number",
+                                                min=100,
+                                                max=240,
+                                                step=1,
+                                                placeholder="optional",
                                                 value=None,
                                             ),
                                         ],
@@ -900,12 +942,12 @@ def update_plots(rows):
     return fig_la, fig_hr, slope_txt, intercept_txt
 
 
-
 @dash.callback(
     Output("zones-table", "data"),
     Input("form-items-table", "data"),
+    State("form-max-hr", "value"),
 )
-def compute_zones(step_rows):
+def compute_zones(step_rows, max_hr_input):
     step_rows = step_rows or []
     df = pd.DataFrame(step_rows)
 
@@ -916,78 +958,186 @@ def compute_zones(step_rows):
     for c in ["HR", "La", "A_PO", "rate"]:
         if c not in df.columns:
             df[c] = None
+
     df["HR"] = pd.to_numeric(df["HR"], errors="coerce")
     df["La"] = pd.to_numeric(df["La"], errors="coerce")
     df["A_PO"] = pd.to_numeric(df["A_PO"], errors="coerce")
     df["rate"] = pd.to_numeric(df["rate"], errors="coerce")
 
-    # Keep only rows with HR + La (needed for threshold HR interpolation),
-    # but PO/rate interpolation will still work if those are present too.
+    # Need at least 2 La+HR points to interpolate lactate anchors
     df_la_hr = df.dropna(subset=["La", "HR"]).copy()
     if len(df_la_hr) < 2:
-        # Not enough lactate+HR to estimate LT anchors -> fallback zones by observed HR range
-        hrmin = df["HR"].min()
-        hrmax = df["HR"].max()
-        if pd.isna(hrmin) or pd.isna(hrmax):
-            return ZONES_DEFAULT_ROWS
+        return ZONES_DEFAULT_ROWS
 
-        # crude 5 equal bins as fallback
-        edges = np.linspace(float(hrmin), float(hrmax), 6)
-        zones = []
-        for i, zn in enumerate(["Z1", "Z2", "Z3", "Z4", "Z5"]):
-            low = edges[i]
-            high = edges[i+1] if i < 4 else None
-            zones.append(_zone_row_from_bounds(df, zn, low if i > 0 else None, high, notes="Fallback: HR-range bins"))
-        return zones
+    # Max HR for upper zones
+    if max_hr_input is not None and max_hr_input != "":
+        hr_max = float(max_hr_input)
+    else:
+        hr_max = df["HR"].max()
+        if pd.isna(hr_max):
+            hr_max = df_la_hr["HR"].max()
 
-    # ---- Set fixed LT lactate targets ----
-    lt1_la = 2.0  # Fixed LT1 = 2 mmol
-    lt2_la = 4.0  # Fixed LT2 = 4 mmol
-    lt3_la = 6.0  # Fixed LT3 = 6 mmol
+    hr_max = float(hr_max)
 
-    # ---- HR at LT1, LT2, LT3 from La->HR interpolation ----
-    # sort by La, average duplicates
-    d = df_la_hr.groupby("La", as_index=False)["HR"].mean().sort_values("La")
-    la = d["La"].to_numpy(dtype=float)
-    hr = d["HR"].to_numpy(dtype=float)
+    # ---------- Interpolation helpers ----------
+    # Interp HR at given lactate
+    d_la_hr = df_la_hr.groupby("La", as_index=False)["HR"].mean().sort_values("La")
+    la_vals = d_la_hr["La"].to_numpy(dtype=float)
+    hr_vals = d_la_hr["HR"].to_numpy(dtype=float)
 
-    def _hr_at_la(target):
-        if target <= la.min():
-            return float(hr[0])
-        if target >= la.max():
-            return float(hr[-1])
-        return float(np.interp(float(target), la, hr))
+    def hr_at_la(target_la: float) -> float:
+        # clamp to observed range
+        if target_la <= la_vals.min():
+            return float(hr_vals[0])
+        if target_la >= la_vals.max():
+            return float(hr_vals[-1])
+        return float(np.interp(float(target_la), la_vals, hr_vals))
 
-    hr_lt1 = _hr_at_la(lt1_la)
-    hr_lt2 = _hr_at_la(lt2_la)
-    hr_lt3 = _hr_at_la(lt3_la)
+    # Interp PO at given lactate (if PO present)
+    df_la_po = df.dropna(subset=["La", "A_PO"]).copy()
+    po_at_la_ok = len(df_la_po) >= 2
+    if po_at_la_ok:
+        d_la_po = df_la_po.groupby("La", as_index=False)["A_PO"].mean().sort_values("La")
+        la_po_vals = d_la_po["La"].to_numpy(dtype=float)
+        po_vals = d_la_po["A_PO"].to_numpy(dtype=float)
 
-    # Ensure ordering (from slow to fast)
-    if hr_lt1 > hr_lt2:
-        hr_lt1, hr_lt2 = hr_lt2, hr_lt1
-        lt1_la, lt2_la = lt2_la, lt1_la
-    if hr_lt2 > hr_lt3:
-        hr_lt2, hr_lt3 = hr_lt3, hr_lt2
-        lt2_la, lt3_la = lt3_la, lt2_la
+        def po_at_la(target_la: float) -> float:
+            if target_la <= la_po_vals.min():
+                return float(po_vals[0])
+            if target_la >= la_po_vals.max():
+                return float(po_vals[-1])
+            return float(np.interp(float(target_la), la_po_vals, po_vals))
+    else:
+        po_at_la = None  # type: ignore
 
-    # ---- Build 5 zones (same structure as before; adjust if you want different splits) ----
-    band = 5.0  # bpm around thresholds
-    z1_hi = max(0.0, hr_lt1 - band)
-    z2_lo, z2_hi = z1_hi, hr_lt1 + band
-    z3_lo, z3_hi = z2_hi, max(z2_hi, hr_lt2 - band)
-    z4_lo, z4_hi = z3_hi, hr_lt2 + band
-    z5_lo = z4_hi
+    # Interp HR at a given PO (for PO-midpoint boundary)
+    def hr_at_po(target_po: float) -> float | None:
+        return _interp_y_at_x(df, "A_PO", "HR", target_po)
+
+    # Interp PO at a given HR (for Z5/Z6 PO_low only)
+    def po_at_hr(target_hr: float) -> float | None:
+        return _interp_y_at_x(df, "HR", "A_PO", target_hr)
+
+    def rate_at_hr(target_hr: float) -> float | None:
+        return _interp_y_at_x(df, "HR", "rate", target_hr)
+
+    def split_from_po(target_po: float | None) -> str | None:
+        if target_po is None:
+            return None
+        sec = estimate_split_seconds(target_po)
+        return format_split_mmss(sec)
+
+    # Build a row with explicit HR and PO bounds
+    def zone_row(
+        zone_code: str,
+        label: str,
+        hr_low: float | None,
+        hr_high: float | None,
+        po_low: float | None,
+        po_high: float | None,
+        notes: str = "",
+    ):
+        # Rate bounds from HR bounds (if available)
+        rate_low = rate_at_hr(hr_low) if hr_low is not None else None
+        rate_high = rate_at_hr(hr_high) if hr_high is not None else None
+
+        # Split bounds from PO bounds (if available)
+        split_low = split_from_po(po_low)
+        split_high = split_from_po(po_high)
+
+        return {
+            "Zone": f"{zone_code}/{label}",
+            "HR_low": round(hr_low, 0) if hr_low is not None else None,
+            "HR_high": round(hr_high, 0) if hr_high is not None else None,
+            "PO_low": round(po_low, 1) if po_low is not None else None,
+            "PO_high": round(po_high, 1) if po_high is not None else None,
+            "Split_low": split_low,
+            "Split_high": split_high,
+            "Rate_low": round(rate_low, 1) if rate_low is not None else None,
+            "Rate_high": round(rate_high, 1) if rate_high is not None else None,
+            "Notes": notes or "",
+        }
+
+    # ---------- Physiology team zone definitions ----------
+    LA_LOW_C6 = 1.5
+    LA_2 = 2.0
+    LA_4 = 4.0
+
+    hr_15 = hr_at_la(LA_LOW_C6)
+    hr_2 = hr_at_la(LA_2)
+    hr_4 = hr_at_la(LA_4)
+
+    # Ensure monotonic ordering in case of messy input
+    hr_15, hr_2, hr_4 = sorted([hr_15, hr_2, hr_4])
+
+    # Z1/C7: 100 bpm to low C6 (HR at 1.5 mmol)
+    z1_lo = 100.0
+    z1_hi = hr_15
+
+    # Z2/C6: 1.5–2 mmol HR
+    z2_lo = hr_15
+    z2_hi = hr_2
+
+    # Z3/C5 and Z4/C4 require PO@2 and PO@4, then midpoint PO
+    if not po_at_la_ok:
+        # Can't build PO-based zones without PO+La data
+        return [
+            zone_row("Z1", "C7", z1_lo, z1_hi, po_at_hr(z1_lo), po_at_hr(z1_hi), notes="HR-based"),
+            zone_row("Z2", "C6", z2_lo, z2_hi, po_at_hr(z2_lo), po_at_hr(z2_hi), notes="HR-based"),
+            zone_row("Z3", "C5", z2_hi, hr_4, po_at_hr(z2_hi), po_at_hr(hr_4), notes="Fallback (no La→PO)"),
+            zone_row("Z4", "C4", None, None, None, None, notes="Fallback (no La→PO)"),
+            zone_row("Z5", "C3", hr_4, (hr_4 + hr_max) / 2.0, po_at_hr(hr_4), None, notes="HR-based"),
+            zone_row("Z6", "C2/C1", (hr_4 + hr_max) / 2.0, hr_max, None, None, notes="HR-based"),
+        ]
+
+    po_2 = float(po_at_la(LA_2))
+    po_4 = float(po_at_la(LA_4))
+    po_lo, po_hi = (po_2, po_4) if po_2 <= po_4 else (po_4, po_2)
+    po_mid = (po_lo + po_hi) / 2.0
+
+    # HR bounds for the PO boundaries
+    hr_at_po2 = hr_at_po(po_lo)
+    hr_at_pomid = hr_at_po(po_mid)
+    hr_at_po4 = hr_at_po(po_hi)
+
+    # If HR~PO interpolation fails (e.g., no overlap), fall back to lactate HR anchors
+    if hr_at_po2 is None:
+        hr_at_po2 = hr_2
+    if hr_at_pomid is None:
+        hr_at_pomid = (hr_2 + hr_4) / 2.0
+    if hr_at_po4 is None:
+        hr_at_po4 = hr_4
+
+    # Z3/C5: 2 mmol W/HR to midpoint W
+    z3_po_lo, z3_po_hi = po_lo, po_mid
+    z3_hr_lo, z3_hr_hi = float(hr_at_po2), float(hr_at_pomid)
+
+    # Z4/C4: midpoint W to 4 mmol W/HR
+    z4_po_lo, z4_po_hi = po_mid, po_hi
+    z4_hr_lo, z4_hr_hi = float(hr_at_pomid), float(hr_at_po4)
+
+    # Z5/C3: 4 mmol HR to halfway to max HR (no need watts zone)
+    z5_hr_lo = hr_4
+    z5_hr_hi = (hr_4 + hr_max) / 2.0
+
+    # Z6/C2/C1: C3 upper HR to max HR
+    z6_hr_lo = z5_hr_hi
+    z6_hr_hi = hr_max
+
+    # PO lows for Z5/Z6 (only) from HR; PO_high intentionally None
+    z5_po_low = po_at_hr(z5_hr_lo)
+    z6_po_low = po_at_hr(z6_hr_lo)
 
     zones = [
-        _zone_row_from_bounds(df, "Z1", None, z1_hi, notes=f"LT1≈{lt1_la:.1f} mmol (HR≈{hr_lt1:.0f})"),
-        _zone_row_from_bounds(df, "Z2", z2_lo, z2_hi, notes="Endurance"),
-        _zone_row_from_bounds(df, "Z3", z3_lo, z3_hi, notes="Tempo"),
-        _zone_row_from_bounds(df, "Z4", z4_lo, z4_hi, notes=f"LT2≈{lt2_la:.1f} mmol (HR≈{hr_lt2:.0f})"),
-        _zone_row_from_bounds(df, "Z5", z5_lo, None, notes="High intensity"),
+        zone_row("Z1", "C7", z1_lo, z1_hi, po_at_hr(z1_lo), po_at_hr(z1_hi), notes="100 bpm → low C6 (HR@1.5)"),
+        zone_row("Z2", "C6", z2_lo, z2_hi, po_at_hr(z2_lo), po_at_hr(z2_hi), notes="1.5–2 mmol HR"),
+        zone_row("Z3", "C5", z3_hr_lo, z3_hr_hi, z3_po_lo, z3_po_hi, notes="2 mmol W → midpoint (2–4 mmol W)"),
+        zone_row("Z4", "C4", z4_hr_lo, z4_hr_hi, z4_po_lo, z4_po_hi, notes="Midpoint → 4 mmol W"),
+        zone_row("Z5", "C3", z5_hr_lo, z5_hr_hi, z5_po_low, None, notes="4 mmol HR → halfway to max HR"),
+        zone_row("Z6", "C2/C1", z6_hr_lo, z6_hr_hi, z6_po_low, None, notes="Halfway → max HR"),
     ]
 
     return zones
-
 
 
 def create_lactate_vs_po_plot(df):
