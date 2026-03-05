@@ -61,6 +61,7 @@ DEFAULT_ROWS = [{
     "rate": None,
     "split": None,   # computed
     "rpe": None,
+    "time_s": None,
 },    
 {"step_no": 2,
     "Type": "Submax",
@@ -72,6 +73,7 @@ DEFAULT_ROWS = [{
     "rate": None,
     "split": None,   # computed
     "rpe": None,
+    "time_s": None,
 } , 
 {"step_no": 3,
     "Type": "Submax",
@@ -83,6 +85,7 @@ DEFAULT_ROWS = [{
     "rate": None,
     "split": None,   # computed
     "rpe": None,
+    "time_s": None,
 } 
 ]
 
@@ -100,6 +103,7 @@ TABLE_COLUMNS = [
     {"name": "Split time", "id": "split", "type": "numeric", "editable": False},
 
     {"name": "RPE", "id": "rpe", "type": "numeric"},
+    {"name": "Time in Step (s)", "id": "time_s", "type": "numeric"},
 ]
 
 
@@ -672,6 +676,7 @@ def modify_table(add_clicks, del_clicks, rows, selected_rows, mode):
             "rate": None,
             "split": None,     # computed
             "rpe": None,
+            "time_s": None,
         })
         return rows, []
 
@@ -756,13 +761,14 @@ def compute_split_column(_, rows):
     Input("form-reset", "n_clicks"),
     State("form-name", "value"),      # will now be profile_id (int)
     State("form-mass", "value"),
+    State("form-test-date", "date"),   # Test date
     State("form-status", "value"),    # your Test Type (erg_C2, erg_RP3, row, etc.)
     State("form-mode", "value"),      # Max/Submax
     State("form-notes", "value"),
     State("form-items-table", "data"),
     prevent_initial_call=True,
 )
-def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_type, mode, notes, table_rows):
+def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_date, test_type, mode, notes, table_rows):
     trig = ctx.triggered_id
 
     if trig == "form-reset":
@@ -775,6 +781,9 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_type, mo
     # --- basic validation ---
     if profile_id is None:
         return no_update, "Please select an athlete before submitting.", True
+
+    if test_date is None:
+        return no_update, "Please select a test date before submitting.", True
 
     table_rows = table_rows or []
     if not isinstance(table_rows, list) or len(table_rows) == 0:
@@ -796,6 +805,7 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_type, mo
             "profile_id": int(profile_id),
             "session_id": session_id,
             "session_ts": session_ts,
+            "test_date": test_date,
             "body_mass_kg": mass,
             "test_type": test_type,   # erg_C2, erg_RP3, row, bike...
             "mode": mode,             # Max/Submax
@@ -812,6 +822,7 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_type, mo
             "rate_spm": r.get("rate"),
             "split_sec_per_500": r.get("split"),
             "rpe": r.get("rpe"),
+            "time_s": r.get("time_s"),
         })
 
     if not records:
@@ -833,6 +844,14 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_type, mo
 
     # --- ingest into warehouse ---
     try:
+        if not VO2_STEP_SOURCE_UUID:
+            return payload, "Ingest failed: VO2_STEP_SOURCE_UUID is not set (is None/empty). Check settings.py / env vars.", True
+        
+        import settings
+        print("WAREHOUSE BASE_URL:", settings.SITE_URL)
+        print("VO2_STEP_SOURCE_UUID:", repr(settings.VO2_STEP_SOURCE_UUID))
+        src = wc.get_source(settings.VO2_STEP_SOURCE_UUID)
+        print("SOURCE:", src)
         dataset, created = wc.ingest_raw(
             source_uuid=VO2_STEP_SOURCE_UUID,
             records=records,

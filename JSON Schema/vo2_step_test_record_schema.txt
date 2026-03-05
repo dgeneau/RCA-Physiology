@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csipacific.ca/schemas/vo2_step_test_record.schema.json",
+  "title": "VO2 Step Test Record",
+  "description": "One record per step row ingested from the Dash VO2 Step Testing entry form (pages/entry.py).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile_id",
+    "session_id",
+    "session_ts",
+    "test_date",
+    "step_no"
+  ],
+  "properties": {
+    "profile_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Athlete profile ID (subject_field)."
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session identifier used to group all steps for a test (e.g., '<profile_id>_<session_ts>')."
+    },
+    "session_ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp for the session/test creation (ISO8601)."
+    },
+    "test_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of the test (YYYY-MM-DD)."
+    },
+    "body_mass_kg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Body mass in kg (optional)."
+    },
+    "test_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Test type selected in the UI.",
+      "enum": [
+        "erg_C2",
+        "erg_RP3",
+        "row",
+        "bike",
+        "other",
+        null
+      ]
+    },
+    "mode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Test mode selected in the UI.",
+      "enum": [
+        "Max",
+        "Submax",
+        null
+      ]
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-text notes from the form (may be empty)."
+    },
+    "step_no": {
+      "type": [
+        "integer",
+        "number"
+      ],
+      "minimum": 0,
+      "description": "Step number (as entered in the table)."
+    },
+    "step_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Step row type (usually matches mode; from table column 'Type')."
+    },
+    "target_po_w": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Target power output (W)."
+    },
+    "actual_po_w": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Actual power output (W)."
+    },
+    "hr_bpm": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Heart rate (bpm)."
+    },
+    "lactate_mmol": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Blood lactate (mmol/L)."
+    },
+    "vo2": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "VO2 value (units as captured; optional)."
+    },
+    "rate_spm": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Stroke rate (spm)."
+    },
+    "split_sec_per_500": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Computed split time in seconds per 500m."
+    },
+    "rpe": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 20,
+      "description": "Rating of Perceived Exertion (typically 0\u201310 or 6\u201320 depending on scale)."
+    },
+    "time_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Time spent in the step (seconds)."
+    }
+    "test_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date",
+      "description": "Date of test (if added to records in the future)."
+    },
+    "max_hr_bpm": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Max HR (if added to records in the future)."
+    }
+  }
+}

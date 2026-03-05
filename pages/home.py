@@ -79,7 +79,7 @@ def layout():
                                         ),
                                         dbc.Button(
                                             "Go to reporting",
-                                            href="/reporting",
+                                            href="/tindeq",
                                             color="secondary",
                                         ),
                                     ]

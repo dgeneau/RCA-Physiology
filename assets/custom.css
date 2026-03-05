@@ -71,3 +71,10 @@ body {
   margin-top: 6px;
   margin-bottom: 12px;
 }
+
+.DateInput,
+.DateInput_input,
+.SingleDatePicker,
+.SingleDatePickerInput {
+  width: 100% !important;
+}
