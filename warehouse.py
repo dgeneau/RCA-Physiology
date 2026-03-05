@@ -42,6 +42,11 @@ class WarehouseClient:
     - Optional client-side validation against the head schema for any stream (default 'raw')
     """
 
+    def get_datasource(self, *, source_uuid: str) -> Dict[str, Any]:
+        """Fetch DataSource details (raises on 404/403)."""
+        url = self.config.datasource_url(source_uuid)
+        return self._GET_json(url)
+
     def __init__(self, config: WarehouseAPIConfig, token_getter: Callable[[], str]):
         """
         token_getter: callable that returns an OAuth access token (without the 'Bearer ' prefix).
