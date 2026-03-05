@@ -847,11 +847,6 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_date, te
         if not VO2_STEP_SOURCE_UUID:
             return payload, "Ingest failed: VO2_STEP_SOURCE_UUID is not set (is None/empty). Check settings.py / env vars.", True
         
-        import settings
-        print("WAREHOUSE BASE_URL:", settings.SITE_URL)
-        print("VO2_STEP_SOURCE_UUID:", repr(settings.VO2_STEP_SOURCE_UUID))
-        src = wc.get_source(settings.VO2_STEP_SOURCE_UUID)
-        print("SOURCE:", src)
         dataset, created = wc.ingest_raw(
             source_uuid=VO2_STEP_SOURCE_UUID,
             records=records,
