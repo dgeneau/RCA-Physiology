@@ -19,5 +19,5 @@ PROFILE_ENDPOINT = f"/api/registration/profile/"
 RAW_INGEST_ENDPOINT = f"/api/warehouse/ingestion/primary/"
 
 # UUID-only: pass the DataSource UUID string directly
-VO2_STEP_SOURCE_UUID = 'a1bcb8c7-2975-4f6f-ad15-ccfb237366eb'
+VO2_STEP_SOURCE_UUID = 'd9fb2105-c97b-47ae-8117-d6881fcfb166'
 
