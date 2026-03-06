@@ -3,8 +3,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SITE_URL = os.environ.get("SITE_URL","https://apps.csipacific.ca")
-APP_URL = os.environ.get("APP_URL", "https://019c390a-d5fb-ead7-0df0-118fba4280e6.share.connect.posit.cloud/")
-
+#APP_URL = os.environ.get("APP_URL", "https://019c390a-d5fb-ead7-0df0-118fba4280e6.share.connect.posit.cloud/")
+APP_URL = os.environ.get("APP_URL", "http://127.0.0.1:8050/")
 AUTH_URL = f"{SITE_URL}/o/authorize"
 TOKEN_URL = f"{SITE_URL}/o/token/"
 CLIENT_ID = "bDf3z9KwxSzCFtxabQ10UwlnHCMl2IsE5teZWLu4"
@@ -18,6 +18,6 @@ PROFILE_ENDPOINT = f"/api/registration/profile/"
 
 RAW_INGEST_ENDPOINT = f"/api/warehouse/ingestion/primary/"
 
-# UUID-only: pass the DataSource UUID string directly
-VO2_STEP_SOURCE_UUID = 'd9fb2105-c97b-47ae-8117-d6881fcfb166'
+#VO2_STEP_SOURCE_UUID = 'a1bcb8c7-2975-4f6f-ad15-ccfb237366eb'  # OLD - doesn't exist
+VO2_STEP_SOURCE_UUID = '144f56a2-f10e-4c4b-bd8a-98afdc025f93'  # Set to None until you create/get the correct datasource UUID
 
