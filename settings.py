@@ -7,7 +7,7 @@ APP_URL = os.environ.get("APP_URL", "https://019c390a-d5fb-ead7-0df0-118fba4280e
 
 AUTH_URL = f"{SITE_URL}/o/authorize"
 TOKEN_URL = f"{SITE_URL}/o/token/"
-CLIENT_ID = os.environ.get("CLIENT_ID", "bDf3z9KwxSzCFtxabQ10UwlnHCMl2IsE5teZWLu4")
+CLIENT_ID = "bDf3z9KwxSzCFtxabQ10UwlnHCMl2IsE5teZWLu4"
 CLIENT_SECRET ="em7L8NeqjKP8vxTEYRz7LrnHKz7aU8pm7t0DfbCiyQkljgz2YEyf7j2wCfWuN3m21QfKehzAwkwBc8boXGYSOJWFm6PAif4iHQ3kbT5xZ5safDeBlt03YDgqr5EhooYR" #os.environ.get("CLIENT_SECRET")
 
 #
