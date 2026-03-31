@@ -19,14 +19,67 @@ from utils import fetch_profiles
 
 from settings import SITE_URL, VO2_STEP_SOURCE_UUID
 from warehouse import WarehouseAPIConfig, WarehouseClient, WarehouseClientError
+import base64
+import io
 
 cfg = WarehouseAPIConfig(base_url=SITE_URL)
 wc = WarehouseClient(cfg, token_getter=auth.get_token)
 
+dash.register_page(__name__, path="/entry", name="Data Entry")
 
+# === One-off batch upload settings (remove after use) ===
+SPORT_ORG_ID = 13  # adjust to your org ID if needed
+BATCH_UPLOAD_DRY_RUN = False  # set False to actually push data
 
-dash.register_page(__name__, path="/entry", name="Entry")
+# Set to False to hide the batch-upload UI; the batch code still remains available.
+ENABLE_BATCH_UPLOAD_UI = True
 
+# Optional overrides for athlete names in the uploaded CSV.
+# Keys are values from the 'About' column; values are profile_id (preferred) or exact full name.
+MANUAL_PROFILE_MAP = {
+    #"Payton  Gauthier": 1234,
+    # "Athlete 2": "Jane Smith",
+}
+
+# Athletes to ignore when uploading (their rows will be skipped).
+# Use the exact string as it appears in the 'About' column of the CSV.
+SKIP_ATHLETES = {
+    "Annika Goodwyn", 
+    "Cait Whittard", 
+    "Carter Cranmer-Smith", 
+    "Conor Dillon",
+    "Janette Peachey",
+    "Joseph McCoy", 
+    "Kamal Elbogdadi", 
+    "Lexi Shimnowski", 
+    "Madelyn Vandermeer", 
+    "Tess Friar", 
+    "Daniel de Groot", 
+    "Andrew Hubbard", 
+    "Claire Ellison", 
+    "Euan Coulson", 
+    "Jack (John) Walkey",
+    "Jennifer Casson", 
+    "Joshua King", 
+    "Kai Bartel",
+    "Kyle Nummi", 
+    "Leia Till",
+    "Liam Keane",
+    "Lisa Samuel",
+    "Luke Gadsdon",
+    "Michael Caryk",
+    "Mitchell Rodgers",
+    "Olivia McMurray", 
+    "Rebecca Zimmerman",
+    "William Simpson", 
+    "Emily Munroe", 
+    "Gavin Stone", 
+
+}
+
+# If set, only upload this athlete's rows (matching 'About', case-insensitive).
+# Useful for testing a single athlete before uploading the full file.
+TEST_ONLY_ATHLETE = None # e.g. "Jane Smith"
 
 # =========================================================
 # STEP TEST TABLE
@@ -92,14 +145,15 @@ TABLE_COLUMNS = [
 # ERG TEST TABLE (each row = one athlete)
 # =========================================================
 ERG_DEFAULT_ROWS = [
-    {"row_no": 1, "profile_id": "", "stroke_rate_spm": None, "power_w": None, "time_s": None},
-    {"row_no": 2, "profile_id": "", "stroke_rate_spm": None, "power_w": None, "time_s": None},
-    {"row_no": 3, "profile_id": "", "stroke_rate_spm": None, "power_w": None, "time_s": None},
+    {"row_no": 1, "profile_id": "", "distance_m": None, "stroke_rate_spm": None, "power_w": None, "time_s": None},
+    {"row_no": 2, "profile_id": "", "distance_m": None, "stroke_rate_spm": None, "power_w": None, "time_s": None},
+    {"row_no": 3, "profile_id": "", "distance_m": None, "stroke_rate_spm": None, "power_w": None, "time_s": None},
 ]
 
 ERG_TABLE_COLUMNS = [
     {"name": "Row", "id": "row_no", "type": "numeric"},
     {"name": "Athlete", "id": "profile_id", "type": "text", "presentation": "dropdown"},
+    {"name": "Distance (m)", "id": "distance_m", "type": "numeric", "presentation": "dropdown"},
     {"name": "Stroke Rate (spm)", "id": "stroke_rate_spm", "type": "numeric"},
     {"name": "Power (W)", "id": "power_w", "type": "numeric"},
     {"name": "Time (s)", "id": "time_s", "type": "numeric"},
@@ -152,6 +206,292 @@ def to_float(x):
         return float(x)
     except Exception:
         return None
+
+
+# --------------------------------------------------
+# ONE-OFF BATCH-UPLOAD HELPERS (remove after use)
+# --------------------------------------------------
+
+def clean_value(x):
+    if pd.isna(x):
+        return None
+    if isinstance(x, str):
+        x = x.strip()
+        return x if x != "" else None
+    return x
+
+
+def parse_rpe(x):
+    """Parse RPE fields like '2- Fairly light' -> 2."""
+    x = clean_value(x)
+    if x is None:
+        return None
+
+    if isinstance(x, (int, float)) and not pd.isna(x):
+        return float(x)
+
+    s = str(x).strip()
+    if "-" in s:
+        s = s.split("-", 1)[0].strip()
+
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def map_test_type(test_type, other_test_type=None):
+    test_type = clean_value(test_type)
+    other_test_type = clean_value(other_test_type)
+
+    mapping = {
+        "Erg C2": "erg_C2",
+        "Erg RP3": "erg_RP3",
+        "On-Water": "row",
+        "Bike": "bike",
+        "Other": "other",
+    }
+
+    if test_type in mapping:
+        return mapping[test_type]
+
+    if test_type:
+        tt = str(test_type).lower()
+        if "c2" in tt:
+            return "erg_C2"
+        if "rp3" in tt:
+            return "erg_RP3"
+        if "water" in tt or "row" in tt:
+            return "row"
+        if "bike" in tt:
+            return "bike"
+        if "other" in tt:
+            return "other"
+
+    if other_test_type:
+        return "other"
+
+    return None
+
+
+def resolve_profile_id(csv_name, by_name):
+    """Resolve CSV athlete name to profile_id."""
+    csv_name = clean_value(csv_name)
+    if csv_name is None:
+        return None
+
+    # manual direct mapping
+    if csv_name in MANUAL_PROFILE_MAP:
+        mapped = MANUAL_PROFILE_MAP[csv_name]
+        if isinstance(mapped, int):
+            return mapped
+        if isinstance(mapped, str):
+            return by_name.get(mapped.strip().lower())
+
+    # exact match
+    return by_name.get(str(csv_name).strip().lower())
+
+
+def prepare_batch_dataframe(contents, filename):
+    """Parse uploaded CSV contents into a cleaned DataFrame."""
+    if not contents:
+        raise ValueError("No file content provided.")
+
+    header, encoded = contents.split(",", 1)
+    data = base64.b64decode(encoded)
+
+    if filename.lower().endswith(".csv"):
+        df = pd.read_csv(io.StringIO(data.decode("utf-8")))
+    else:
+        raise ValueError("Only CSV uploads are supported.")
+
+    required_cols = [
+        "Date",
+        "About",
+        "Body Weight (kg)",
+        "Test Type",
+        "Other Test Type",
+        "Notes",
+        "Step Number",
+        "Submax/Max",
+        "Target PO",
+        "Actual PO",
+        "Heart Rate",
+        "Blood Lactate",
+        "VO2",
+        "Stroke Rate",
+        "Split",
+        "RPE",
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV is missing required columns: {missing}")
+
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].apply(clean_value)
+
+    df["test_date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    if df["test_date"].isna().any():
+        bad_rows = df[df["test_date"].isna()][["Date", "About"]]
+        raise ValueError(f"Some dates could not be parsed:\n{bad_rows}")
+
+    numeric_map = {
+        "Body Weight (kg)": "body_mass_kg",
+        "Step Number": "step_no",
+        "Target PO": "target_po_w",
+        "Actual PO": "actual_po_w",
+        "Heart Rate": "hr_bpm",
+        "Blood Lactate": "lactate_mmol",
+        "VO2": "vo2",
+        "Stroke Rate": "rate_spm",
+        "Split": "split_sec_per_500",
+    }
+    for src, dst in numeric_map.items():
+        df[dst] = pd.to_numeric(df[src], errors="coerce")
+
+    df["rpe"] = df["RPE"].apply(parse_rpe)
+    df["step_type"] = df["Submax/Max"].apply(clean_value)
+    df["mode"] = df["Submax/Max"].apply(clean_value)
+    df["notes_clean"] = df["Notes"].apply(clean_value)
+    df["test_type_clean"] = df.apply(
+        lambda r: map_test_type(r["Test Type"], r["Other Test Type"]),
+        axis=1,
+    )
+
+    session_group = [
+        "About",
+        "test_date",
+        "Test Type",
+        "Other Test Type",
+        "Notes",
+    ]
+
+    df["body_mass_kg"] = (
+        df.groupby(session_group, dropna=False)["body_mass_kg"]
+        .transform(lambda s: s.ffill().bfill())
+    )
+
+    return df
+
+
+def build_batch_records(df, by_name):
+    """Turn a cleaned batch DataFrame into warehouse records.
+
+    Returns:
+        (records, skipped_names)
+    """
+    df = df.copy()
+    df["profile_id"] = df["About"].apply(lambda x: resolve_profile_id(x, by_name))
+
+    # Skip athletes explicitly listed in SKIP_ATHLETES
+    skipped = sorted(
+        df.loc[
+            df["About"].isin(SKIP_ATHLETES),
+            "About",
+        ]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    if skipped:
+        df = df[~df["About"].isin(SKIP_ATHLETES)]
+
+    # Report any remaining unmatched athletes
+    unmatched = sorted(df.loc[df["profile_id"].isna(), "About"].dropna().unique().tolist())
+    if unmatched:
+        raise ValueError(
+            "Could not resolve these CSV athlete names to profile_id:\n"
+            + "\n".join(f" - {name}" for name in unmatched)
+            + "\n\nAdd them to MANUAL_PROFILE_MAP, or add them to SKIP_ATHLETES to ignore them."
+        )
+
+    # Convert to int once we know all are resolved
+    df["profile_id"] = df["profile_id"].astype(int)
+
+    # Validate required numeric fields before ingesting, so we can give a helpful error
+    missing_step_no = df[df["step_no"].isna()]
+    if not missing_step_no.empty:
+        first = missing_step_no.iloc[0]
+        raise ValueError(
+            "Missing 'Step Number' (required) for some rows. "
+            f"First missing row: About={first.get('About')!r}, Date={first.get('Date')!r}. "
+            "Please ensure all rows have a 'Step Number'."
+        )
+
+    session_group = [
+        "profile_id",
+        "test_date",
+        "test_type_clean",
+        "notes_clean",
+    ]
+
+    sessions = (
+        df[session_group]
+        .drop_duplicates()
+        .sort_values(session_group)
+        .reset_index(drop=True)
+    )
+    sessions["session_idx"] = range(1, len(sessions) + 1)
+
+    df = df.merge(sessions, on=session_group, how="left")
+
+    df["session_ts"] = df["test_date"].apply(
+        lambda d: datetime(d.year, d.month, d.day, 12, 0, 0).isoformat(timespec="seconds")
+    )
+    df["session_id"] = df.apply(
+        lambda r: f"{int(r['profile_id'])}_{r['test_date'].strftime('%Y%m%d')}_{int(r['session_idx']):03d}",
+        axis=1,
+    )
+
+    records = []
+    for _, r in df.iterrows():
+        step_no_val = clean_value(r["step_no"])
+        if step_no_val is None:
+            # Should not happen due to earlier validation, but guard defensively.
+            raise ValueError(
+                f"Missing step number for athlete={r.get('About')!r}, date={r.get('Date')!r}."
+            )
+        try:
+            step_no_val = int(float(step_no_val))
+        except Exception:
+            raise ValueError(
+                f"Invalid step number {step_no_val!r} for athlete={r.get('About')!r}, date={r.get('Date')!r}."
+            )
+
+        records.append(
+            {
+                "profile_id": int(r["profile_id"]),
+                "session_id": r["session_id"],
+                "session_ts": r["session_ts"],
+                "test_date": r["test_date"].date().isoformat(),
+                "body_mass_kg": clean_value(r["body_mass_kg"]),
+                "test_type": clean_value(r["test_type_clean"]),
+                "mode": clean_value(r["mode"]),
+                "notes": clean_value(r["notes_clean"]) or "",  # schema requires a string (not null)
+                "step_no": step_no_val,
+                "step_type": clean_value(r["step_type"]),
+                "target_po_w": clean_value(r["target_po_w"]),
+                "actual_po_w": clean_value(r["actual_po_w"]),
+                "hr_bpm": clean_value(r["hr_bpm"]),
+                "lactate_mmol": clean_value(r["lactate_mmol"]),
+                "vo2": clean_value(r["vo2"]),
+                "rate_spm": clean_value(r["rate_spm"]),
+                "split_sec_per_500": clean_value(r["split_sec_per_500"]),
+                "rpe": clean_value(r["rpe"]),
+                "time_s": None,
+            }
+        )
+
+    return records, skipped
+
+
+def chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+# END ONE-OFF BATCH-UPLOAD HELPERS
 
 
 def estimate_split_seconds(power_w):
@@ -222,6 +562,48 @@ def _interp_y_at_x(df, x_col, y_col, x_target):
 # =========================================================
 # LAYOUT
 # =========================================================
+
+# Toggle whether the one-off batch upload UI is shown.
+# The batch upload logic remains available if you want to call it programmatically.
+BATCH_UPLOAD_UI = (
+    [
+        html.H5("One-off Batch CSV Upload", className="mt-3"),
+        dcc.Upload(
+            id="batch-upload",
+            children=html.Div(
+                [
+                    "Drag and drop a CSV file here, or click to select.",
+                ]
+            ),
+            style={
+                "width": "100%",
+                "height": "80px",
+                "lineHeight": "80px",
+                "borderWidth": "1px",
+                "borderStyle": "dashed",
+                "borderRadius": "5px",
+                "textAlign": "center",
+                "marginBottom": "8px",
+            },
+            accept=".csv",
+            multiple=False,
+        ),
+        dbc.Button(
+            "Upload CSV to Warehouse",
+            id="batch-upload-submit",
+            color="secondary",
+            className="w-100 mb-2",
+        ),
+        dbc.Alert(id="batch-upload-status", color="info", is_open=False),
+        html.Small(
+            "(Remove this batch-upload section after you’ve completed the one-off import)",
+            className="text-muted",
+        ),
+    ]
+    if ENABLE_BATCH_UPLOAD_UI
+    else []
+)
+
 layout = dbc.Container(
     [
         html.H2("Entry"),
@@ -369,6 +751,8 @@ layout = dbc.Container(
                                                 className="g-2",
                                             ),
                                             dcc.Download(id="form-download-csv"),
+
+                                            *BATCH_UPLOAD_UI,
                                             html.Hr(),
                                             dbc.Alert(id="form-status-msg", color="success", is_open=False),
                                         ],
@@ -487,91 +871,154 @@ layout = dbc.Container(
                                     ],
                                     className="mb-2",
                                 ),
-                                # In the Erg tab DataTable, make sure you have:
-                                dash_table.DataTable(
-                                    id="erg-items-table",
-                                    data=ERG_DEFAULT_ROWS,
-                                    columns=ERG_TABLE_COLUMNS,
-                                    dropdown={},
-                                    editable=True,
-                                    row_selectable="multi",
-                                    selected_rows=[],
-                                    page_action="native",
-                                    page_size=12,
-                                    style_table={
-                                        "overflowX": "auto",
-                                        "overflowY": "visible",
+
+                                html.Div(
+                                    dash_table.DataTable(
+                                        id="erg-items-table",
+                                        data=ERG_DEFAULT_ROWS,
+                                        columns=ERG_TABLE_COLUMNS,
+                                        dropdown={
+                                            "profile_id": {
+                                                "clearable": True,
+                                                "options": [],
+                                            },
+                                            "distance_m": {
+                                                "clearable": False,
+                                                "options": [
+                                                    {"label": "2000", "value": 2000},
+                                                    {"label": "6000", "value": 6000},
+                                                ],
+                                            },
+                                        },
+                                        editable=True,
+                                        row_selectable="multi",
+                                        selected_rows=[],
+                                        page_action="native",
+                                        page_size=12,
+                                        style_table={
+                                            "overflowX": "auto",
+                                            "overflowY": "visible",
+                                            "position": "relative",
+                                            "zIndex": 10,
+                                        },
+                                        style_cell={
+                                            "padding": "6px 10px",
+                                            "fontFamily": "system-ui",
+                                            "fontSize": 14,
+                                            "textAlign": "center",
+                                            "verticalAlign": "middle",
+                                            "height": "48px",
+                                        },
+                                        style_header={
+                                            "fontWeight": "700",
+                                            "textAlign": "center",
+                                            "backgroundColor": "#f8f9fa",
+                                            "border": "1px solid #dee2e6",
+                                        },
+                                        style_data={
+                                            "backgroundColor": "white",
+                                            "border": "1px solid #dee2e6",
+                                        },
+                                        style_cell_conditional=[
+                                            {"if": {"column_id": "row_no"}, "width": "70px"},
+                                            {"if": {"column_id": "profile_id"}, "width": "260px", "textAlign": "left"},
+                                            {"if": {"column_id": "distance_m"}, "width": "140px"},
+                                            {"if": {"column_id": "stroke_rate_spm"}, "width": "150px"},
+                                            {"if": {"column_id": "power_w"}, "width": "130px"},
+                                            {"if": {"column_id": "time_s"}, "width": "130px"},
+                                        ],
+                                        css=[
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-menu-outer",
+                                                "rule": "display: block !important; z-index: 3000 !important; max-height: 260px;",
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-option",
+                                                "rule": "color: #212529 !important; background-color: white !important; padding: 8px 10px !important;",
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-option.is-focused",
+                                                "rule": "background-color: #f8f9fa !important;",
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-value-label",
+                                                "rule": """
+                                                    color: #212529 !important;
+                                                    display: inline-block !important;
+                                                    max-width: 100% !important;
+                                                    overflow: hidden !important;
+                                                    text-overflow: ellipsis !important;
+                                                    white-space: nowrap !important;
+                                                    line-height: 38px !important;
+                                                    padding-left: 4px !important;
+                                                    padding-right: 20px !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-control",
+                                                "rule": """
+                                                    background-color: transparent !important;
+                                                    border: none !important;
+                                                    border-radius: 0 !important;
+                                                    box-shadow: none !important;
+                                                    width: 100% !important;
+                                                    min-width: 100% !important;
+                                                    max-width: 100% !important;
+                                                    min-height: 38px !important;
+                                                    height: 38px !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select",
+                                                "rule": """
+                                                    width: 100% !important;
+                                                    min-width: 100% !important;
+                                                    max-width: 100% !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-placeholder",
+                                                "rule": """
+                                                    color: #6c757d !important;
+                                                    line-height: 38px !important;
+                                                    padding-left: 4px !important;
+                                                    padding-right: 20px !important;
+                                                    overflow: hidden !important;
+                                                    text-overflow: ellipsis !important;
+                                                    white-space: nowrap !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-input",
+                                                "rule": """
+                                                    height: 36px !important;
+                                                    margin-left: 4px !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .Select-arrow-zone",
+                                                "rule": """
+                                                    padding-right: 6px !important;
+                                                """,
+                                            },
+                                            {
+                                                "selector": ".dash-spreadsheet-container .is-focused:not(.is-open) > .Select-control",
+                                                "rule": """
+                                                    background-color: #f8fbff !important;
+                                                    box-shadow: inset 0 0 0 1px #86b7fe !important;
+                                                """,
+                                            },
+                                        ],
+                                    ),
+                                    style={
+                                        "position": "relative",
+                                        "zIndex": 20,
+                                        "marginBottom": "1rem",
                                     },
-                                    style_cell={
-                                        "padding": "8px",
-                                        "fontFamily": "system-ui",
-                                        "fontSize": 14,
-                                    },
-                                    style_header={"fontWeight": "600"},
-                                    css=[
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-menu-outer",
-                                            "rule": "display: block !important; z-index: 2000; max-height: 300px;",
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-option",
-                                            "rule": "color: black !important; background-color: white !important;",
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-value-label",
-                                            "rule": """
-                                                color: black !important;
-                                                display: inline-block !important;
-                                                max-width: 100% !important;
-                                                overflow: hidden !important;
-                                                text-overflow: ellipsis !important;
-                                                white-space: nowrap !important;
-                                            """,
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-control",
-                                            "rule": """
-                                                background-color: white !important;
-                                                border: 1px solid #ced4da !important;
-                                                border-radius: 4px !important;
-                                                box-shadow: none !important;
-                                                width: 100% !important;
-                                                min-width: 100% !important;
-                                                max-width: 100% !important;
-                                            """,
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select",
-                                            "rule": """
-                                                width: 100% !important;
-                                                min-width: 100% !important;
-                                                max-width: 100% !important;
-                                            """,
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-placeholder",
-                                            "rule": """
-                                                overflow: hidden !important;
-                                                text-overflow: ellipsis !important;
-                                                white-space: nowrap !important;
-                                            """,
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .Select-input",
-                                            "rule": """
-                                                width: 1px !important;
-                                                max-width: 1px !important;
-                                                overflow: hidden !important;
-                                            """,
-                                        },
-                                        {
-                                            "selector": ".dash-spreadsheet-container .is-focused:not(.is-open) > .Select-control",
-                                            "rule": "border-color: #86b7fe !important; box-shadow: 0 0 0 0.2rem rgba(13,110,253,.25);",
-                                        },
-                                    ],
                                 ),
+
                                 dcc.Download(id="erg-download-csv"),
-                                html.Br(),
+
                                 dbc.Row(
                                     [
                                         dbc.Col(make_card("Rows", html.H4(id="erg-row-count", className="m-0")), md=3),
@@ -579,12 +1026,12 @@ layout = dbc.Container(
                                         dbc.Col(make_card("Avg Rate", html.H4(id="erg-avg-rate", className="m-0")), md=3),
                                         dbc.Col(make_card("Total Time", html.H4(id="erg-total-time", className="m-0")), md=3),
                                     ],
-                                    className="g-2",
+                                    className="g-2 mt-4",
                                 ),
                             ],
                         )
                     ],
-                ),
+                )
             ],
             id="entry-tabs",
             active_tab="tab-step-test",
@@ -626,7 +1073,19 @@ def load_athlete_options(_):
 )
 def apply_athlete_options(options):
     if not options:
-        return [], {"profile_id": {"options": []}}
+        return [], {
+            "profile_id": {
+                "clearable": True,
+                "options": [],
+            },
+            "distance_m": {
+                "clearable": False,
+                "options": [
+                    {"label": "2000", "value": 2000},
+                    {"label": "6000", "value": 6000},
+                ],
+            },
+        }
 
     erg_options = [
         {"label": opt["label"], "value": str(opt["value"])}
@@ -637,7 +1096,14 @@ def apply_athlete_options(options):
         "profile_id": {
             "clearable": True,
             "options": erg_options,
-        }
+        },
+        "distance_m": {
+            "clearable": False,
+            "options": [
+                {"label": "2000", "value": 2000},
+                {"label": "6000", "value": 6000},
+            ],
+        },
     }
 # =========================================================
 # STEP TEST CALLBACKS
@@ -838,6 +1304,74 @@ def submit_or_reset(submit_clicks, reset_clicks, profile_id, mass, test_date, te
 
     except WarehouseClientError as e:
         return payload, f"Ingest failed: {e}", True
+
+
+# --------------------------------------------------
+# One-off batch CSV upload callback (remove after use)
+# --------------------------------------------------
+if ENABLE_BATCH_UPLOAD_UI:
+
+    @dash.callback(
+        Output("batch-upload-status", "children"),
+        Output("batch-upload-status", "color"),
+        Output("batch-upload-status", "is_open"),
+        Input("batch-upload-submit", "n_clicks"),
+        State("batch-upload", "contents"),
+        State("batch-upload", "filename"),
+        prevent_initial_call=True,
+    )
+    def batch_upload(n_clicks, contents, filename):
+        if not contents:
+            return "No file uploaded.", "warning", True
+
+        if not VO2_STEP_SOURCE_UUID:
+            return (
+                "Batch upload failed: VO2_STEP_SOURCE_UUID is not set. Set it in settings.py.",
+                "danger",
+                True,
+            )
+
+        try:
+            df = prepare_batch_dataframe(contents, filename)
+
+            if TEST_ONLY_ATHLETE:
+                df = df[df["About"].str.strip().str.lower() == TEST_ONLY_ATHLETE.strip().lower()]
+                if df.empty:
+                    return (
+                        f"No rows found for TEST_ONLY_ATHLETE='{TEST_ONLY_ATHLETE}'.", "warning", True
+                    )
+
+            token = auth.get_token()
+            profiles = fetch_profiles(token, {"sport_org_id": SPORT_ORG_ID})
+            by_name = {
+                f"{p['person']['first_name']} {p['person']['last_name']}".strip().lower(): int(p['id'])
+                for p in profiles
+                if p.get('person')
+            }
+
+            records, skipped = build_batch_records(df, by_name)
+            if BATCH_UPLOAD_DRY_RUN:
+                msg = f"Dry run: prepared {len(records)} records (no upload)."
+                if skipped:
+                    msg += f" Skipped {len(skipped)} athletes: {', '.join(skipped)}."
+                msg += " Change BATCH_UPLOAD_DRY_RUN to False to ingest."
+                return msg, "info", True
+
+            dataset, created = wc.ingest_raw(
+                source_uuid=VO2_STEP_SOURCE_UUID,
+                records=records,
+                subject_field="profile_id",
+                validate_client_side=False,
+            )
+
+            return (
+                f"Uploaded {created} records (dataset {dataset.get('uuid')}).",
+                "success",
+                True,
+            )
+
+        except Exception as e:
+            return f"Batch upload failed: {e}", "danger", True
 
 
 @dash.callback(
@@ -1126,6 +1660,7 @@ def modify_erg_table(add_clicks, del_clicks, rows, selected_rows):
         rows.append({
             "row_no": next_no,
             "profile_id": "",
+            "distance_m": None,
             "stroke_rate_spm": None,
             "power_w": None,
             "time_s": None,

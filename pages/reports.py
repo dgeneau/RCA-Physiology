@@ -52,6 +52,146 @@ REPORT_TABLE_COLUMNS = [
 # =========================================================
 # HELPERS
 # =========================================================
+
+
+def make_session_label(df):
+    """
+    Short display label for legend, while preserving separate sessions internally.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=list(df.columns) + ["test_date_dt", "session_label", "session_key"]) if df is not None else pd.DataFrame(columns=["test_date_dt", "session_label", "session_key"])
+
+    dff = df.copy()
+
+    for col, default in [("test_date", pd.NaT), ("session_id", None), ("mode", None)]:
+        if col not in dff.columns:
+            dff[col] = default
+
+    dff["test_date_dt"] = pd.to_datetime(dff["test_date"], errors="coerce")
+
+    def _label(row):
+        dt = row["test_date_dt"]
+        date_txt = dt.strftime("%Y-%m-%d") if pd.notna(dt) else "Unknown date"
+        mode_txt = str(row.get("mode", "Unknown")).strip() if pd.notna(row.get("mode", None)) else "Unknown"
+        return f"{date_txt} | {mode_txt}"
+
+    def _key(row):
+        dt = row["test_date_dt"]
+        date_txt = dt.strftime("%Y-%m-%d") if pd.notna(dt) else "Unknown date"
+        mode_txt = str(row.get("mode", "Unknown")).strip() if pd.notna(row.get("mode", None)) else "Unknown"
+        sid = row.get("session_id", "")
+        return f"{date_txt} | {mode_txt} | {sid}"
+
+    dff["session_label"] = dff.apply(_label, axis=1)   # short legend text
+    dff["session_key"] = dff.apply(_key, axis=1)       # unique grouping key
+    return dff
+
+def estimate_power_at_lactate_thresholds(session_df, thresholds=(2, 4, 6), grid_n=400):
+    """
+    Estimate the power (W) at given lactate thresholds using a curve fit of
+    lactate vs actual power within a single session.
+
+    Approach:
+    - Uses quadratic fit if >= 3 unique points
+    - Falls back to linear fit if only 2 unique points
+    - Estimates threshold power from a dense grid within the observed power range
+    - Returns NaN if threshold is outside fitted range
+    """
+    dff = session_df.dropna(subset=["actual_po_w", "lactate_mmol"]).copy()
+
+    if dff.empty:
+        return {f"lt_{int(t)}_w": np.nan for t in thresholds} | {"fit_degree": np.nan, "n_points": 0}
+
+    # collapse duplicate powers to mean lactate
+    dff = (
+        dff.groupby("actual_po_w", as_index=False)["lactate_mmol"]
+        .mean()
+        .sort_values("actual_po_w")
+    )
+
+    x = dff["actual_po_w"].to_numpy(dtype=float)
+    y = dff["lactate_mmol"].to_numpy(dtype=float)
+
+    # need at least 2 unique power points
+    if len(x) < 2 or np.nanmin(x) == np.nanmax(x):
+        return {f"lt_{int(t)}_w": np.nan for t in thresholds} | {"fit_degree": np.nan, "n_points": len(x)}
+
+    # choose fit degree
+    deg = 2 if len(x) >= 3 else 1
+
+    try:
+        coeffs = np.polyfit(x, y, deg=deg)
+        poly = np.poly1d(coeffs)
+    except Exception:
+        return {f"lt_{int(t)}_w": np.nan for t in thresholds} | {"fit_degree": np.nan, "n_points": len(x)}
+
+    grid = np.linspace(np.nanmin(x), np.nanmax(x), grid_n)
+    yhat = poly(grid)
+
+    out = {}
+    yhat_min = np.nanmin(yhat)
+    yhat_max = np.nanmax(yhat)
+
+    for t in thresholds:
+        col = f"lt_{int(t)}_w"
+
+        # only estimate if threshold is within fitted range
+        if t < min(yhat_min, yhat_max) or t > max(yhat_min, yhat_max):
+            out[col] = np.nan
+            continue
+
+        idx = np.nanargmin(np.abs(yhat - t))
+        out[col] = float(grid[idx])
+
+    out["fit_degree"] = deg
+    out["n_points"] = len(x)
+    return out
+
+
+def build_lactate_threshold_trend_df(df):
+    """
+    One row per session with estimated LT2 / LT4 / LT6 powers.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    sess = df.copy()
+    sess["test_date_dt"] = pd.to_datetime(sess["test_date"], errors="coerce")
+
+    rows = []
+    group_cols = ["session_id", "profile_id", "athlete_name", "test_date_dt"]
+
+    for keys, g in sess.groupby(group_cols, dropna=False):
+        session_id, profile_id, athlete_name, test_date_dt = keys
+
+        est = estimate_power_at_lactate_thresholds(g, thresholds=(2, 4, 6))
+
+        rows.append({
+            "session_id": session_id,
+            "profile_id": profile_id,
+            "athlete_name": athlete_name,
+            "test_date_dt": test_date_dt,
+            "lt_2_w": est["lt_2_w"],
+            "lt_4_w": est["lt_4_w"],
+            "lt_6_w": est["lt_6_w"],
+            "fit_degree": est["fit_degree"],
+            "n_points": est["n_points"],
+            "max_po": g["actual_po_w"].max(skipna=True),
+            "max_la": g["lactate_mmol"].max(skipna=True),
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    return out.sort_values(["test_date_dt", "athlete_name", "session_id"])
+
+
+
+
+
+
+
 def make_card(title, body):
     return dbc.Card(
         [dbc.CardHeader(html.B(title)), dbc.CardBody(body)],
@@ -91,38 +231,23 @@ def safe_date_str(x):
 def _extract_record_payload(rec):
     """
     Try to pull the actual ingested payload out of a warehouse record.
-    Supports a few likely response shapes.
     """
     if not isinstance(rec, dict):
         return {}
 
-    # Case 1: raw fields are already top-level
+    # Raw fields already top-level
     if "profile_id" in rec or "session_id" in rec or "test_date" in rec:
         return rec
 
-    # Case 2: warehouse wraps payload under 'data'
-    if isinstance(rec.get("data"), dict):
-        return rec["data"]
+    # Common wrapped shapes
+    for key in ["data", "record", "raw"]:
+        if isinstance(rec.get(key), dict):
+            return rec[key]
 
-    # Case 3: warehouse wraps payload under 'record'
-    if isinstance(rec.get("record"), dict):
-        return rec["record"]
-
-    # Case 4: warehouse wraps payload under 'raw'
-    if isinstance(rec.get("raw"), dict):
-        return rec["raw"]
-
-    # Fallback: return original and let downstream handle it
     return rec
 
 
 def normalize_records_to_df(records):
-    if not records:
-        return pd.DataFrame()
-
-    extracted = [_extract_record_payload(r) for r in records]
-    df = pd.DataFrame(extracted)
-
     expected_cols = [
         "profile_id",
         "session_id",
@@ -144,6 +269,13 @@ def normalize_records_to_df(records):
         "rpe",
         "time_s",
     ]
+
+    if not records:
+        return pd.DataFrame(columns=expected_cols)
+
+    extracted = [_extract_record_payload(r) for r in records]
+    df = pd.DataFrame(extracted)
+
     for c in expected_cols:
         if c not in df.columns:
             df[c] = None
@@ -189,7 +321,8 @@ def apply_local_filters(df, profile_id=None, start_date=None, end_date=None, tes
         dff = dff[dff["test_date"] >= pd.to_datetime(start_date)]
 
     if end_date:
-        dff = dff[dff["test_date"] <= pd.to_datetime(end_date)]
+        # inclusive end date
+        dff = dff[dff["test_date"] < (pd.to_datetime(end_date) + pd.Timedelta(days=1))]
 
     if test_type not in (None, "", "all"):
         dff = dff[dff["test_type"] == test_type]
@@ -215,27 +348,21 @@ def fetch_step_test_data_from_warehouse(
     mode=None,
 ):
     """
-    Read records from the warehouse using WarehouseClient.list_records().
-    Note: collected_after/before filters operate on warehouse collection time,
-    not necessarily your test_date, so we still apply local filtering after load.
+    Pull records from warehouse, then filter locally by ingested test_date.
     """
     if not source_uuid:
         raise ValueError("VO2_STEP_SOURCE_UUID is not set.")
 
-    collected_after = pd.to_datetime(start_date) if start_date else None
-    collected_before = pd.to_datetime(end_date) if end_date else None
-
     records = wc.list_records(
         source_uuid=source_uuid,
         subject=int(profile_id) if profile_id not in (None, "", []) else None,
-        collected_after=collected_after,
-        collected_before=collected_before,
         role="primary",
         page_size=500,
     )
 
     df = normalize_records_to_df(records)
-    df = apply_local_filters(
+
+    return apply_local_filters(
         df,
         profile_id=profile_id,
         start_date=start_date,
@@ -243,8 +370,6 @@ def fetch_step_test_data_from_warehouse(
         test_type=test_type,
         mode=mode,
     )
-    return df
-
 def add_athlete_names(df, athlete_options):
     if df is None or df.empty:
         df = pd.DataFrame(columns=["profile_id"])
@@ -298,7 +423,7 @@ layout = dbc.Container(
                                             dbc.Label("Start Date"),
                                             dcc.DatePickerSingle(
                                                 id="reporting-start-date",
-                                                date=(date.today() - timedelta(days=180)).isoformat(),
+                                                date=(date.today() - timedelta(days=365)).isoformat(),
                                                 display_format="YYYY-MM-DD",
                                                 clearable=True,
                                             ),
@@ -310,7 +435,7 @@ layout = dbc.Container(
                                             dbc.Label("End Date"),
                                             dcc.DatePickerSingle(
                                                 id="reporting-end-date",
-                                                date=date.today().isoformat(),
+                                                date=(date.today() + timedelta(days=365)).isoformat(),
                                                 display_format="YYYY-MM-DD",
                                                 clearable=True,
                                             ),
@@ -578,7 +703,6 @@ def update_reporting_table(records):
 )
 def update_reporting_plots(records, athlete_options):
     df = normalize_records_to_df(records)
-    df = add_athlete_names(df, athlete_options)
 
     # ---------- Empty figs ----------
     empty_fig = go.Figure()
@@ -591,86 +715,331 @@ def update_reporting_plots(records, athlete_options):
     if df.empty:
         return empty_fig, empty_fig, empty_fig
 
-    # ---------- PO vs HR ----------
+    df = add_athlete_names(df, athlete_options)
+    df = make_session_label(df)
+
+    # ---------- Empty figs ----------
+    empty_fig = go.Figure()
+    empty_fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=20, r=20, t=50, b=20),
+        title="No data",
+    )
+
+    if df.empty:
+        return empty_fig, empty_fig, empty_fig
+
+    # sort for cleaner line drawing
+    df = df.sort_values(["athlete_name", "test_date", "session_id", "step_no", "actual_po_w"])
+
+    # =========================================================
+    # PO vs HR with linear fits per session
+    # =========================================================
     df_hr = df.dropna(subset=["actual_po_w", "hr_bpm"]).copy()
+
+    fig_hr = go.Figure()
     if df_hr.empty:
         fig_hr = empty_fig
     else:
-        fig_hr = px.scatter(
-            df_hr,
-            x="actual_po_w",
-            y="hr_bpm",
-            color="athlete_name",
-            hover_data=["test_date", "step_no", "test_type", "mode"],
-            title="Heart Rate vs Actual PO",
-            labels={
-                "actual_po_w": "Actual PO (W)",
-                "hr_bpm": "Heart Rate (bpm)",
-                "athlete_name": "Athlete",
-            },
-        )
-        fig_hr.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=50, b=20))
+        # color by session/test day
+        session_labels_hr = list(df_hr["session_label"].dropna().unique())
+        palette = px.colors.qualitative.Plotly + px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
 
-    # ---------- PO vs La ----------
+        color_map_hr = {
+            lab: palette[i % len(palette)]
+            for i, lab in enumerate(session_labels_hr)
+        }
+
+        for sess_key, g in df_hr.groupby("session_key", dropna=False):
+            sess_label = g["session_label"].iloc[0]
+            session_keys_hr = list(df_hr["session_key"].dropna().unique())
+            color_map_hr = {
+                key: palette[i % len(palette)]
+                for i, key in enumerate(session_keys_hr)
+            }
+            g = g.sort_values("actual_po_w")
+            color = color_map_hr.get(sess_key, None)
+
+            athlete_name = g["athlete_name"].iloc[0] if "athlete_name" in g.columns and len(g) else "Athlete"
+
+            # scatter points
+            fig_hr.add_trace(
+                go.Scatter(
+                    x=g["actual_po_w"],
+                    y=g["hr_bpm"],
+                    mode="markers",
+                    name=f"{sess_label} points",
+                    legendgroup=str(sess_label),
+                    marker=dict(size=8, color=color),
+                    customdata=np.stack(
+                        [
+                            g["athlete_name"].astype(str),
+                            g["test_date"].astype(str),
+                            g["step_no"].astype(str),
+                            g["test_type"].astype(str),
+                            g["mode"].astype(str),
+                            g["session_id"].astype(str),
+                        ],
+                        axis=-1,
+                    ),
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>"
+                        "Session: %{customdata[5]}<br>"
+                        "Date: %{customdata[1]}<br>"
+                        "Step: %{customdata[2]}<br>"
+                        "Test Type: %{customdata[3]}<br>"
+                        "Mode: %{customdata[4]}<br>"
+                        "PO: %{x:.1f} W<br>"
+                        "HR: %{y:.1f} bpm<extra></extra>"
+                    ),
+                )
+            )
+
+            # linear fit if enough data
+            fit_df = g.dropna(subset=["actual_po_w", "hr_bpm"]).copy()
+            fit_df = fit_df.groupby("actual_po_w", as_index=False)["hr_bpm"].mean().sort_values("actual_po_w")
+
+            if len(fit_df) >= 2 and fit_df["actual_po_w"].nunique() >= 2:
+                x = fit_df["actual_po_w"].to_numpy(dtype=float)
+                y = fit_df["hr_bpm"].to_numpy(dtype=float)
+
+                try:
+                    coeffs = np.polyfit(x, y, deg=1)
+                    poly = np.poly1d(coeffs)
+
+                    x_fit = np.linspace(np.nanmin(x), np.nanmax(x), 200)
+                    y_fit = poly(x_fit)
+
+                    # optional R²
+                    y_pred = poly(x)
+                    ss_res = np.sum((y - y_pred) ** 2)
+                    ss_tot = np.sum((y - np.mean(y)) ** 2)
+                    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+
+                    fig_hr.add_trace(
+                        go.Scatter(
+                            x=x_fit,
+                            y=y_fit,
+                            mode="lines",
+                            name=f"{sess_label} fit",
+                            legendgroup=str(sess_label),
+                            line=dict(width=3, color=color),
+                            hovertemplate=(
+                                f"{athlete_name}<br>"
+                                f"{sess_label}<br>"
+                                f"Linear fit"
+                                + (f"<br>R²: {r2:.3f}" if pd.notna(r2) else "")
+                                + "<br>PO: %{x:.1f} W<br>HR: %{y:.1f} bpm<extra></extra>"
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
+
+        fig_hr.update_layout(
+            template="plotly_white",
+            margin=dict(l=20, r=20, t=50, b=20),
+            title="Heart Rate vs Actual PO (Linear Fit by Test Day)",
+            xaxis_title="Actual PO (W)",
+            yaxis_title="Heart Rate (bpm)",
+            legend_title_text="Test Day / Session",
+        )
+
+    # =========================================================
+    # PO vs Lactate with quadratic fits per session
+    # =========================================================
     df_la = df.dropna(subset=["actual_po_w", "lactate_mmol"]).copy()
+
+    fig_la = go.Figure()
     if df_la.empty:
         fig_la = empty_fig
     else:
-        fig_la = px.scatter(
-            df_la,
-            x="actual_po_w",
-            y="lactate_mmol",
-            color="athlete_name",
-            hover_data=["test_date", "step_no", "test_type", "mode"],
-            title="Blood Lactate vs Actual PO",
-            labels={
-                "actual_po_w": "Actual PO (W)",
-                "lactate_mmol": "Blood Lactate",
-                "athlete_name": "Athlete",
-            },
+        session_labels_la = list(df_la["session_label"].dropna().unique())
+        palette = px.colors.qualitative.Plotly + px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
+
+        color_map_la = {
+            lab: palette[i % len(palette)]
+            for i, lab in enumerate(session_labels_la)
+        }
+
+        for sess_key, g in df_la.groupby("session_key", dropna=False):
+            sess_label = g["session_label"].iloc[0]
+            session_keys_la = list(df_la["session_key"].dropna().unique())
+            color_map_la = {
+                key: palette[i % len(palette)]
+                for i, key in enumerate(session_keys_la)
+            }
+            color = color_map_la.get(sess_key, None)
+
+            athlete_name = g["athlete_name"].iloc[0] if "athlete_name" in g.columns and len(g) else "Athlete"
+
+            # scatter points
+            fig_la.add_trace(
+                go.Scatter(
+                    x=g["actual_po_w"],
+                    y=g["lactate_mmol"],
+                    mode="markers",
+                    name=f"{sess_label} points",
+                    legendgroup=str(sess_label),
+                    marker=dict(size=8, color=color),
+                    customdata=np.stack(
+                        [
+                            g["athlete_name"].astype(str),
+                            g["test_date"].astype(str),
+                            g["step_no"].astype(str),
+                            g["test_type"].astype(str),
+                            g["mode"].astype(str),
+                            g["session_id"].astype(str),
+                        ],
+                        axis=-1,
+                    ),
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>"
+                        "Session: %{customdata[5]}<br>"
+                        "Date: %{customdata[1]}<br>"
+                        "Step: %{customdata[2]}<br>"
+                        "Test Type: %{customdata[3]}<br>"
+                        "Mode: %{customdata[4]}<br>"
+                        "PO: %{x:.1f} W<br>"
+                        "Lactate: %{y:.2f} mmol/L<extra></extra>"
+                    ),
+                )
+            )
+
+            # quadratic fit if enough points, otherwise linear fallback
+            fit_df = g.dropna(subset=["actual_po_w", "lactate_mmol"]).copy()
+            fit_df = (
+                fit_df.groupby("actual_po_w", as_index=False)["lactate_mmol"]
+                .mean()
+                .sort_values("actual_po_w")
+            )
+
+            n_unique = fit_df["actual_po_w"].nunique()
+
+            if n_unique >= 2:
+                x = fit_df["actual_po_w"].to_numpy(dtype=float)
+                y = fit_df["lactate_mmol"].to_numpy(dtype=float)
+
+                deg = 2 if n_unique >= 3 else 1
+
+                try:
+                    coeffs = np.polyfit(x, y, deg=deg)
+                    poly = np.poly1d(coeffs)
+
+                    x_fit = np.linspace(np.nanmin(x), np.nanmax(x), 250)
+                    y_fit = poly(x_fit)
+
+                    # optional R²
+                    y_pred = poly(x)
+                    ss_res = np.sum((y - y_pred) ** 2)
+                    ss_tot = np.sum((y - np.mean(y)) ** 2)
+                    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+
+                    fit_name = "Quadratic fit" if deg == 2 else "Linear fit"
+
+                    fig_la.add_trace(
+                        go.Scatter(
+                            x=x_fit,
+                            y=y_fit,
+                            mode="lines",
+                            name=f"{sess_label} fit",
+                            legendgroup=str(sess_label),
+                            line=dict(width=3, color=color),
+                            hovertemplate=(
+                                f"{athlete_name}<br>"
+                                f"{sess_label}<br>"
+                                f"{fit_name}"
+                                + (f"<br>R²: {r2:.3f}" if pd.notna(r2) else "")
+                                + "<br>PO: %{x:.1f} W<br>Lactate: %{y:.2f} mmol/L<extra></extra>"
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
+
+        fig_la.update_layout(
+            template="plotly_white",
+            margin=dict(l=20, r=20, t=50, b=20),
+            title="Blood Lactate vs Actual PO (Fit by Test Day)",
+            xaxis_title="Actual PO (W)",
+            yaxis_title="Blood Lactate (mmol/L)",
+            legend_title_text="Test Day / Session",
         )
-        fig_la.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=50, b=20))
 
-    # ---------- Session trend ----------
-    # one point per session: max PO + max HR + max La
-    sess = df.copy()
-    sess["test_date_dt"] = pd.to_datetime(sess["test_date"], errors="coerce")
+    # =========================================================
+    # Threshold trend
+    # =========================================================
+    trend_df = build_lactate_threshold_trend_df(df)
 
-    agg = (
-        sess.groupby(["session_id", "profile_id", "athlete_name", "test_date_dt"], dropna=False)
-        .agg(
-            max_po=("actual_po_w", "max"),
-            max_hr=("hr_bpm", "max"),
-            max_la=("lactate_mmol", "max"),
-            avg_po=("actual_po_w", "mean"),
-            avg_hr=("hr_bpm", "mean"),
-        )
-        .reset_index()
-        .sort_values("test_date_dt")
-    )
-
-    if agg.empty:
+    if trend_df.empty:
         fig_trend = empty_fig
     else:
-        fig_trend = px.line(
-            agg,
-            x="test_date_dt",
-            y="max_po",
-            color="athlete_name",
-            markers=True,
-            hover_data=["session_id", "max_hr", "max_la", "avg_po", "avg_hr"],
-            title="Session Trend: Max PO by Test Date",
-            labels={
-                "test_date_dt": "Test Date",
-                "max_po": "Max PO (W)",
-                "athlete_name": "Athlete",
-            },
+        trend_long = trend_df.melt(
+            id_vars=[
+                "session_id",
+                "profile_id",
+                "athlete_name",
+                "test_date_dt",
+                "fit_degree",
+                "n_points",
+                "max_po",
+                "max_la",
+            ],
+            value_vars=["lt_2_w", "lt_4_w", "lt_6_w"],
+            var_name="threshold",
+            value_name="power_w",
         )
-        fig_trend.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=50, b=20))
+
+        threshold_map = {
+            "lt_2_w": "2 mmol",
+            "lt_4_w": "4 mmol",
+            "lt_6_w": "6 mmol",
+        }
+        trend_long["threshold_label"] = trend_long["threshold"].map(threshold_map)
+        trend_long = trend_long.dropna(subset=["test_date_dt", "power_w"]).copy()
+
+        if trend_long.empty:
+            fig_trend = empty_fig
+        else:
+            fig_trend = px.line(
+                trend_long,
+                x="test_date_dt",
+                y="power_w",
+                color="athlete_name",
+                line_dash="threshold_label",
+                markers=True,
+                hover_data={
+                    "session_id": True,
+                    "athlete_name": True,
+                    "threshold_label": True,
+                    "power_w": ":.1f",
+                    "fit_degree": True,
+                    "n_points": True,
+                    "max_po": ":.1f",
+                    "max_la": ":.2f",
+                    "test_date_dt": False,
+                },
+                title="Estimated Power at 2, 4, and 6 mmol Lactate Thresholds",
+                labels={
+                    "test_date_dt": "Test Date",
+                    "power_w": "Estimated Power (W)",
+                    "athlete_name": "Athlete",
+                    "threshold_label": "Threshold",
+                },
+            )
+
+            fig_trend.update_layout(
+                template="plotly_white",
+                margin=dict(l=20, r=20, t=50, b=20),
+                legend_title_text="Athlete / Threshold",
+            )
+
+            fig_trend.update_traces(
+                mode="lines+markers",
+                marker=dict(size=8),
+            )
 
     return fig_hr, fig_la, fig_trend
-
-
 # =========================================================
 # DOWNLOAD
 # =========================================================

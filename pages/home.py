@@ -91,6 +91,35 @@ def layout():
             ),
 
             html.Hr(),
+
+            dbc.Row(
+                className="g-3",
+                children=[
+                    dbc.Col(
+                        md=6,
+                        children=dbc.Card(
+                            className="shadow-sm",
+                            children=[
+                                dbc.CardHeader("Moxy Data Analysis"),
+                                dbc.CardBody(
+                                    [
+                                        html.P(
+                                            "Analyze Moxy sensor Data.",
+                                            className="text-muted",
+                                        ),
+                                        dbc.Button(
+                                            "Go to Analysis",
+                                            href="/moxy",
+                                            color="primary",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                        ),
+                    ),
+                    
+                ],
+            ),
         ],
     )
 
