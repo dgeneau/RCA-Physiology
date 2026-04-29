@@ -28,24 +28,77 @@ dash.register_page(__name__, path="/reports", name="Reporting")
 # CONSTANTS / DEFAULTS
 # =========================================================
 REPORT_TABLE_COLUMNS = [
-    {"name": "Test Date", "id": "test_date"},
-    {"name": "Athlete ID", "id": "profile_id"},
-    {"name": "Session ID", "id": "session_id"},
-    {"name": "Step", "id": "step_no"},
-    {"name": "Step Type", "id": "step_type"},
-    {"name": "Mode", "id": "mode"},
-    {"name": "Test Type", "id": "test_type"},
-    {"name": "Target PO", "id": "target_po_w"},
-    {"name": "Actual PO", "id": "actual_po_w"},
-    {"name": "HR", "id": "hr_bpm"},
-    {"name": "La", "id": "lactate_mmol"},
-    {"name": "VO2", "id": "vo2"},
-    {"name": "Rate", "id": "rate_spm"},
-    {"name": "Split (s/500)", "id": "split_sec_per_500"},
-    {"name": "RPE", "id": "rpe"},
-    {"name": "Time (s)", "id": "time_s"},
-    {"name": "Body Mass", "id": "body_mass_kg"},
-    {"name": "Notes", "id": "notes"},
+    {"name": "Record UUID", "id": "__record_uuid", "editable": False},
+    {"name": "Test Date", "id": "test_date", "editable": False},
+    {"name": "Athlete ID", "id": "profile_id", "editable": False},
+    {"name": "Session ID", "id": "session_id", "editable": False},
+    {"name": "Step", "id": "step_no", "editable": False},
+    {"name": "Step Type", "id": "step_type", "editable": True},
+    {"name": "Mode", "id": "mode", "editable": True},
+    {"name": "Test Type", "id": "test_type", "editable": True},
+    {"name": "Target PO", "id": "target_po_w", "editable": True},
+    {"name": "Actual PO", "id": "actual_po_w", "editable": True},
+    {"name": "HR", "id": "hr_bpm", "editable": True},
+    {"name": "La", "id": "lactate_mmol", "editable": True},
+    {"name": "VO2", "id": "vo2", "editable": True},
+    {"name": "Rate", "id": "rate_spm", "editable": True},
+    {"name": "Split (s/500)", "id": "split_sec_per_500", "editable": False},
+    {"name": "RPE", "id": "rpe", "editable": True},
+    {"name": "Time (s)", "id": "time_s", "editable": True},
+    {"name": "Body Mass", "id": "body_mass_kg", "editable": True},
+    {"name": "Notes", "id": "notes", "editable": True},
+]
+
+REPORT_EDITABLE_COLUMNS = {
+    col["id"]
+    for col in REPORT_TABLE_COLUMNS
+    if col.get("editable") and not col["id"].startswith("__")
+}
+
+REPORT_NUMERIC_COLUMNS = {
+    "profile_id",
+    "body_mass_kg",
+    "step_no",
+    "target_po_w",
+    "actual_po_w",
+    "hr_bpm",
+    "lactate_mmol",
+    "vo2",
+    "rate_spm",
+    "split_sec_per_500",
+    "rpe",
+    "time_s",
+}
+
+REPORT_INTEGER_COLUMNS = {
+    "profile_id",
+    "step_no",
+}
+
+REPORT_STRING_DEFAULTS = {
+    "notes": "",
+}
+
+REPORT_DATA_COLUMNS = [
+    "profile_id",
+    "session_id",
+    "session_ts",
+    "test_date",
+    "body_mass_kg",
+    "test_type",
+    "mode",
+    "notes",
+    "step_no",
+    "step_type",
+    "target_po_w",
+    "actual_po_w",
+    "hr_bpm",
+    "lactate_mmol",
+    "vo2",
+    "rate_spm",
+    "split_sec_per_500",
+    "rpe",
+    "time_s",
 ]
 
 
@@ -228,6 +281,105 @@ def safe_date_str(x):
     except Exception:
         return None
 
+
+def clean_cell_value(value, column_id):
+    if column_id in REPORT_STRING_DEFAULTS and (value is None or value == "" or pd.isna(value)):
+        return REPORT_STRING_DEFAULTS[column_id]
+    if value is None or value == "":
+        return None
+    if pd.isna(value):
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    if column_id in REPORT_NUMERIC_COLUMNS:
+        numeric_value = to_float(value)
+        if numeric_value is None:
+            return None
+        if column_id in REPORT_INTEGER_COLUMNS:
+            return int(numeric_value)
+        return numeric_value
+    if column_id == "test_date":
+        return safe_date_str(value)
+    if column_id == "session_ts":
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+    return value
+
+
+def row_to_warehouse_payload(row):
+    payload = {}
+    for col in REPORT_DATA_COLUMNS:
+        payload[col] = clean_cell_value(row.get(col), col)
+    return payload
+
+
+def values_equal(a, b, column_id):
+    a_clean = clean_cell_value(a, column_id)
+    b_clean = clean_cell_value(b, column_id)
+
+    if a_clean is None and b_clean is None:
+        return True
+
+    if column_id in REPORT_NUMERIC_COLUMNS:
+        try:
+            return np.isclose(float(a_clean), float(b_clean), equal_nan=True)
+        except Exception:
+            return a_clean == b_clean
+
+    return a_clean == b_clean
+
+
+def dataframe_to_store_records(df):
+    if df is None or df.empty:
+        return []
+
+    out = df.copy()
+    out = out.replace({np.nan: None})
+
+    for col in ["test_date", "session_ts"]:
+        if col in out.columns:
+            out[col] = out[col].apply(
+                lambda x: x.isoformat() if hasattr(x, "isoformat") and pd.notna(x) else None
+            )
+
+    return out.to_dict("records")
+
+
+def original_records_by_uuid(records):
+    rows = {}
+    for rec in records or []:
+        payload = _extract_record_payload(rec)
+        record_uuid = payload.get("__record_uuid") or rec.get("uuid") if isinstance(rec, dict) else None
+        if record_uuid:
+            rows[str(record_uuid)] = payload
+    return rows
+
+
+def merge_replacement_record(updated_row, replacement_record):
+    replacement_payload = _extract_record_payload(replacement_record)
+    merged = updated_row.copy()
+
+    if replacement_payload.get("__record_uuid"):
+        merged["__record_uuid"] = replacement_payload["__record_uuid"]
+    if replacement_payload.get("__dataset_uuid"):
+        merged["__dataset_uuid"] = replacement_payload["__dataset_uuid"]
+
+    return merged
+
+
+def fetch_single_record_from_dataset(dataset_uuid):
+    if not dataset_uuid:
+        return None
+
+    records = wc.list_records(
+        source_uuid=VO2_STEP_SOURCE_UUID,
+        role="primary",
+        page_size=10,
+        extra_params={"dataset_uuid": dataset_uuid},
+    )
+    return records[0] if records else None
+
 def _extract_record_payload(rec):
     """
     Try to pull the actual ingested payload out of a warehouse record.
@@ -242,33 +394,16 @@ def _extract_record_payload(rec):
     # Common wrapped shapes
     for key in ["data", "record", "raw"]:
         if isinstance(rec.get(key), dict):
-            return rec[key]
+            payload = rec[key].copy()
+            payload["__record_uuid"] = rec.get("uuid")
+            payload["__dataset_uuid"] = rec.get("dataset_uuid")
+            return payload
 
     return rec
 
 
 def normalize_records_to_df(records):
-    expected_cols = [
-        "profile_id",
-        "session_id",
-        "session_ts",
-        "test_date",
-        "body_mass_kg",
-        "test_type",
-        "mode",
-        "notes",
-        "step_no",
-        "step_type",
-        "target_po_w",
-        "actual_po_w",
-        "hr_bpm",
-        "lactate_mmol",
-        "vo2",
-        "rate_spm",
-        "split_sec_per_500",
-        "rpe",
-        "time_s",
-    ]
+    expected_cols = ["__record_uuid", "__dataset_uuid"] + REPORT_DATA_COLUMNS
 
     if not records:
         return pd.DataFrame(columns=expected_cols)
@@ -280,21 +415,7 @@ def normalize_records_to_df(records):
         if c not in df.columns:
             df[c] = None
 
-    numeric_cols = [
-        "profile_id",
-        "body_mass_kg",
-        "step_no",
-        "target_po_w",
-        "actual_po_w",
-        "hr_bpm",
-        "lactate_mmol",
-        "vo2",
-        "rate_spm",
-        "split_sec_per_500",
-        "rpe",
-        "time_s",
-    ]
-    for c in numeric_cols:
+    for c in REPORT_NUMERIC_COLUMNS:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df["test_date"] = pd.to_datetime(df["test_date"], errors="coerce")
@@ -513,9 +634,18 @@ layout = dbc.Container(
                                 ],
                                 className="g-2",
                             ),
+                            html.Br(),
+                            dbc.Button(
+                                "Update Warehouse",
+                                id="reporting-update-btn",
+                                color="success",
+                                outline=True,
+                                className="w-100",
+                            ),
                             dcc.Download(id="reporting-download"),
                             html.Hr(),
                             dbc.Alert(id="reporting-status-msg", is_open=False),
+                            dbc.Alert(id="reporting-update-msg", is_open=False),
                         ],
                     ),
                     md=3,
@@ -539,6 +669,8 @@ layout = dbc.Container(
                                 id="reporting-table",
                                 data=[],
                                 columns=REPORT_TABLE_COLUMNS,
+                                hidden_columns=["__record_uuid"],
+                                editable=True,
                                 page_action="native",
                                 page_size=15,
                                 sort_action="native",
@@ -554,6 +686,21 @@ layout = dbc.Container(
                                     "whiteSpace": "normal",
                                 },
                                 style_header={"fontWeight": "600"},
+                                style_header_conditional=[
+                                    {
+                                        "if": {"column_id": col},
+                                        "backgroundColor": "#e8f4ff",
+                                        "color": "#0b4f79",
+                                    }
+                                    for col in REPORT_EDITABLE_COLUMNS
+                                ],
+                                style_data_conditional=[
+                                    {
+                                        "if": {"column_id": col},
+                                        "backgroundColor": "#f3f9ff",
+                                    }
+                                    for col in REPORT_EDITABLE_COLUMNS
+                                ],
                             ),
                         ),
                     ],
@@ -648,7 +795,7 @@ def load_reporting_data(n_clicks, athlete_id, start_date, end_date, test_type, m
         if df.empty:
             return [], "No rows found for the selected filters.", "warning", True
 
-        records = df.to_dict("records")
+        records = dataframe_to_store_records(df)
         return records, f"Loaded {len(df)} row(s) from warehouse.", "success", True
 
     except (WarehouseClientError, ValueError, AttributeError) as e:
@@ -689,6 +836,150 @@ def update_reporting_table(records):
     avg_hr_txt = f"{avg_hr:.1f} bpm" if pd.notna(avg_hr) else "—"
 
     return df_display.to_dict("records"), rows_txt, sessions_txt, avg_po_txt, avg_hr_txt
+
+
+@dash.callback(
+    Output("reporting-data-store", "data", allow_duplicate=True),
+    Output("reporting-update-msg", "children"),
+    Output("reporting-update-msg", "color"),
+    Output("reporting-update-msg", "is_open"),
+    Input("reporting-update-btn", "n_clicks"),
+    State("reporting-table", "data"),
+    State("reporting-data-store", "data"),
+    prevent_initial_call=True,
+)
+def update_warehouse_records(n_clicks, edited_rows, original_records):
+    if not n_clicks:
+        raise PreventUpdate
+
+    original_df = normalize_records_to_df(original_records)
+    edited_df = pd.DataFrame(edited_rows or [])
+
+    if original_df.empty or edited_df.empty:
+        return no_update, "No rows loaded to update.", "warning", True
+
+    if "__record_uuid" not in original_df.columns or "__record_uuid" not in edited_df.columns:
+        return no_update, "Update failed: warehouse record UUIDs are missing. Reload the data and try again.", "danger", True
+
+    original_by_uuid = {
+        str(row["__record_uuid"]): row
+        for row in original_df.to_dict("records")
+        if row.get("__record_uuid")
+    }
+    original_payload_by_uuid = original_records_by_uuid(original_records)
+
+    updated_count = 0
+    local_updates = {}
+
+    try:
+        for edited_row in edited_df.to_dict("records"):
+            record_uuid = edited_row.get("__record_uuid")
+            if not record_uuid:
+                continue
+
+            record_uuid = str(record_uuid)
+            original_row = original_by_uuid.get(record_uuid)
+            if not original_row:
+                continue
+
+            changed_cols = [
+                col
+                for col in REPORT_EDITABLE_COLUMNS
+                if not values_equal(edited_row.get(col), original_row.get(col), col)
+            ]
+
+            if not changed_cols:
+                continue
+
+            updated_row = original_payload_by_uuid.get(record_uuid, original_row).copy()
+            for col in changed_cols:
+                updated_row[col] = clean_cell_value(edited_row.get(col), col)
+            updated_row["__record_uuid"] = record_uuid
+
+            patch_payload = {"data": row_to_warehouse_payload(updated_row)}
+            if updated_row.get("__dataset_uuid"):
+                patch_payload["dataset"] = updated_row["__dataset_uuid"]
+
+            try:
+                wc.patch_record(
+                    record_uuid=record_uuid,
+                    data=patch_payload,
+                )
+                replacement_uuid = record_uuid
+            except WarehouseClientError as patch_error:
+                try:
+                    wc.put_record(
+                        record_uuid=record_uuid,
+                        data=patch_payload,
+                    )
+                    replacement_uuid = record_uuid
+                except WarehouseClientError as put_error:
+                    try:
+                        if not patch_payload.get("dataset"):
+                            raise WarehouseClientError("Skipped direct create: missing dataset UUID.")
+                        replacement_record = wc.create_record(data=patch_payload)
+                    except WarehouseClientError as create_error:
+                        try:
+                            replacement_dataset, created_count = wc.ingest_raw(
+                                source_uuid=VO2_STEP_SOURCE_UUID,
+                                records=[patch_payload["data"]],
+                                subject_field="profile_id",
+                                validate_client_side=False,
+                            )
+                            if created_count != 1:
+                                raise WarehouseClientError(
+                                    f"Ingestion created {created_count} records instead of 1."
+                                )
+                            replacement_record = fetch_single_record_from_dataset(
+                                replacement_dataset.get("uuid")
+                            )
+                            if not replacement_record:
+                                raise WarehouseClientError(
+                                    "Ingestion succeeded but the replacement record could not be reloaded."
+                                )
+                        except WarehouseClientError as ingest_error:
+                            raise WarehouseClientError(
+                                f"PATCH, PUT, direct create, and ingestion replacement all failed for {record_uuid}. "
+                                f"PATCH: {patch_error}. PUT: {put_error}. "
+                                f"CREATE: {create_error}. INGEST: {ingest_error}."
+                            ) from ingest_error
+
+                    replacement_uuid = replacement_record.get("uuid")
+                    try:
+                        wc.delete_record(record_uuid=record_uuid)
+                    except WarehouseClientError as delete_error:
+                        raise WarehouseClientError(
+                            "Replacement record was created, but deleting the old record failed. "
+                            f"Old record: {record_uuid}. Replacement record: {replacement_uuid}. "
+                            f"DELETE: {delete_error}."
+                        ) from delete_error
+
+                    updated_row = merge_replacement_record(updated_row, replacement_record)
+
+            local_updates[record_uuid] = updated_row
+            if replacement_uuid and replacement_uuid != record_uuid:
+                local_updates[str(replacement_uuid)] = updated_row
+            updated_count += 1
+
+    except WarehouseClientError as e:
+        return no_update, f"Update failed: {e}", "danger", True
+    except Exception as e:
+        return no_update, f"Unexpected update error: {e}", "danger", True
+
+    if not updated_count:
+        return no_update, "No editable changes detected.", "info", True
+
+    refreshed = []
+    for row in original_df.to_dict("records"):
+        record_uuid = str(row.get("__record_uuid")) if row.get("__record_uuid") else None
+        refreshed.append(local_updates.get(record_uuid, row))
+
+    return (
+        dataframe_to_store_records(pd.DataFrame(refreshed)),
+        f"Updated {updated_count} warehouse record(s).",
+        "success",
+        True,
+    )
 
 
 # =========================================================
