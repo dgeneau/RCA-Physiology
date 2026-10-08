@@ -35,6 +35,12 @@ from bulk_templates import (
     step_template_csv,
 )
 from warehouse import WarehouseAPIConfig, WarehouseClient, WarehouseClientError
+from step_protocols import (
+    rate_header,
+    rate_out_of_range,
+    rate_range_message,
+    step_profile,
+)
 import base64
 import hashlib
 import io
@@ -256,6 +262,50 @@ ZONES_COLUMNS = [
     {"name": "Rate High (spm)", "id": "Rate_high", "type": "numeric"},
     {"name": "Notes", "id": "Notes", "type": "text"},
 ]
+
+
+def step_table_columns(test_type):
+    """TABLE_COLUMNS as the chosen test type shows them: the rate column is
+    "Cadence (rpm)" on a bike, and the rowing split is dropped where it means
+    nothing. Ids never change, so the stored record shape is the same."""
+    profile = step_profile(test_type)
+    columns = []
+    for col in TABLE_COLUMNS:
+        if col["id"] == "split" and not profile["has_split"]:
+            continue
+        col = dict(col)
+        if col["id"] == "rate":
+            col["name"] = rate_header(test_type)
+        columns.append(col)
+    return columns
+
+
+def zones_table_columns(test_type):
+    profile = step_profile(test_type)
+    unit = f" ({profile['rate_unit']})" if profile["rate_unit"] else ""
+    columns = []
+    for col in ZONES_COLUMNS:
+        if col["id"] in ("Split_low", "Split_high") and not profile["has_split"]:
+            continue
+        col = dict(col)
+        if col["id"] == "Rate_low":
+            col["name"] = f"{profile['rate_label']} Low{unit}"
+        elif col["id"] == "Rate_high":
+            col["name"] = f"{profile['rate_label']} High{unit}"
+        columns.append(col)
+    return columns
+
+
+def rate_range_styles(test_type):
+    """Flag a rate cell red as soon as it leaves the test type's range."""
+    low, high = step_profile(test_type)["rate_range"]
+    return [
+        {
+            "if": {"filter_query": f"{{rate}} < {low} || {{rate}} > {high}", "column_id": "rate"},
+            "backgroundColor": "#f8d7da",
+            "border": "1px solid #dc3545",
+        }
+    ]
 
 
 # =========================================================
@@ -1663,7 +1713,8 @@ layout = dbc.Container(
                                             dash_table.DataTable(
                                                 id="form-items-table",
                                                 data=blank_step_rows(),
-                                                columns=TABLE_COLUMNS,
+                                                columns=step_table_columns(DEFAULT_TEST_TYPE),
+                                                style_data_conditional=rate_range_styles(DEFAULT_TEST_TYPE),
                                                 editable=True,
                                                 row_selectable="multi",
                                                 selected_rows=[],
@@ -1716,7 +1767,7 @@ layout = dbc.Container(
                             dash_table.DataTable(
                                 id="zones-table",
                                 data=ZONES_DEFAULT_ROWS,
-                                columns=ZONES_COLUMNS,
+                                columns=zones_table_columns(DEFAULT_TEST_TYPE),
                                 editable=False,
                                 style_table={"overflowX": "auto"},
                                 style_cell={"padding": "8px", "fontFamily": "system-ui", "fontSize": 14},
@@ -2342,6 +2393,21 @@ def apply_mode_to_all_rows(mode, rows):
 
 
 @dash.callback(
+    Output("form-items-table", "columns"),
+    Output("form-items-table", "style_data_conditional"),
+    Output("zones-table", "columns"),
+    Input("form-status", "value"),
+)
+def apply_test_type_columns(test_type):
+    """Relabel and re-bound the step table for the test being entered."""
+    return (
+        step_table_columns(test_type),
+        rate_range_styles(test_type),
+        zones_table_columns(test_type),
+    )
+
+
+@dash.callback(
     Output("step-table-draft", "data"),
     Input("form-items-table", "data"),
     prevent_initial_call=True,
@@ -2404,8 +2470,9 @@ def restore_table_drafts(_, step_draft, erg_draft):
     Output("form-avg-rate", "children"),
     Output("form-row-count", "children"),
     Input("form-items-table", "data"),
+    Input("form-status", "value"),
 )
-def update_summary_cards(rows):
+def update_summary_cards(rows, test_type):
     rows = rows or []
 
     po_vals = [to_float(r.get("A_PO")) for r in rows if to_float(r.get("A_PO")) is not None]
@@ -2418,7 +2485,8 @@ def update_summary_cards(rows):
 
     po_txt = f"{po_avg:.1f} W" if po_avg is not None else "—"
     hr_txt = f"{hr_avg:.1f} bpm" if hr_avg is not None else "—"
-    rate_txt = f"{rate_avg:.1f} spm" if rate_avg is not None else "—"
+    rate_unit = step_profile(test_type)["rate_unit"]
+    rate_txt = f"{rate_avg:.1f} {rate_unit}".rstrip() if rate_avg is not None else "—"
 
     return po_txt, hr_txt, rate_txt, str(len(rows))
 
@@ -2426,15 +2494,17 @@ def update_summary_cards(rows):
 @dash.callback(
     Output("form-items-table", "data", allow_duplicate=True),
     Input("form-items-table", "data_timestamp"),
+    Input("form-status", "value"),
     State("form-items-table", "data"),
     prevent_initial_call=True,
 )
-def compute_split_column(_, rows):
+def compute_split_column(_, test_type, rows):
     rows = rows or []
     changed = False
+    has_split = step_profile(test_type)["has_split"]
 
     for r in rows:
-        new_split = estimate_split_seconds(r.get("A_PO"))
+        new_split = estimate_split_seconds(r.get("A_PO")) if has_split else None
         if r.get("split") != new_split:
             r["split"] = new_split
             changed = True
@@ -2577,6 +2647,20 @@ def submit_form(
 
     if not records:
         return no_update, no_update, "All rows were empty — nothing to submit.", "warning", True
+
+    bad_rate_steps = []
+    for rec in records:
+        rate = to_float(rec.get("rate_spm"))
+        if rate is not None and rate_out_of_range(test_type, rate):
+            bad_rate_steps.append(str(rec.get("step_no") or "?"))
+    if bad_rate_steps:
+        return (
+            no_update,
+            no_update,
+            f"{rate_range_message(test_type)} Check step(s): {', '.join(bad_rate_steps)}.",
+            "warning",
+            True,
+        )
 
     # Guard against pushing the identical test twice. Each click mints a new
     # session_id, so without this nothing downstream could tell the copies apart.
@@ -2741,8 +2825,10 @@ def update_plots(rows):
     Output("zones-table", "data"),
     Input("form-items-table", "data"),
     Input("form-max-hr", "value"),
+    Input("form-status", "value"),
 )
-def compute_zones(step_rows, max_hr_input):
+def compute_zones(step_rows, max_hr_input, test_type):
+    has_split = step_profile(test_type)["has_split"]
     step_rows = step_rows or []
     df = pd.DataFrame(step_rows)
 
@@ -2808,7 +2894,7 @@ def compute_zones(step_rows, max_hr_input):
         return _interp_y_at_x(df, "HR", "rate", target_hr)
 
     def split_from_po(target_po):
-        if target_po is None:
+        if target_po is None or not has_split:
             return None
         return format_split_mmss(estimate_split_seconds(target_po))
 

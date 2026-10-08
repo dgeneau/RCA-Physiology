@@ -16,6 +16,7 @@ from auth_setup import auth
 from utils import fetch_profiles
 from settings import SITE_URL, VO2_STEP_SOURCE_UUID
 from warehouse import WarehouseAPIConfig, WarehouseClient, WarehouseClientError
+from step_protocols import rate_out_of_range, rate_range_message
 
 import erg_editor  # registers the Erg Scores tab and its callbacks
 
@@ -497,7 +498,6 @@ def validate_reporting_rows(edited_rows):
             "hr_bpm": (30, 240, "HR should be between 30 and 240 bpm."),
             "lactate_mmol": (0, 30, "Lactate should be between 0 and 30 mmol/L."),
             "vo2": (0, 100, "VO2 should be between 0 and 100."),
-            "rate_spm": (0, 80, "Rate should be between 0 and 80 spm."),
             "rpe": (0, 20, "RPE should be between 0 and 20."),
             "time_s": (0, 7200, "Time should be between 0 and 7200 seconds."),
             "body_mass_kg": (20, 250, "Body mass should be between 20 and 250 kg."),
@@ -512,6 +512,15 @@ def validate_reporting_rows(edited_rows):
                 add_issue(col, f"{col} must be numeric.")
             elif value < low or value > high:
                 add_issue(col, message)
+
+        # Rate bounds depend on the test: stroke rate on a rower, cadence on a bike.
+        rate_value = row.get("rate_spm")
+        if rate_value not in (None, ""):
+            value = to_float(rate_value)
+            if value is None:
+                add_issue("rate_spm", "rate_spm must be numeric.")
+            elif rate_out_of_range(row.get("test_type"), value):
+                add_issue("rate_spm", rate_range_message(row.get("test_type")))
 
         for col, options in REPORT_DROPDOWN_OPTIONS.items():
             value = row.get(col)
