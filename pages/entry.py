@@ -24,6 +24,8 @@ from erg_protocols import (
     ERG_PROTOCOL_VALUES,
     PROTOCOL_FIXED_DISTANCE,
     PROTOCOL_FIXED_TIME_MIN,
+    PROTOCOL_PEAK_POWER,
+    POWER_ONLY_PROTOCOLS,
     infer_protocol,
     normalize_protocol,
     protocol_label,
@@ -655,15 +657,35 @@ def resolve_uploaded_profile_id(raw, by_name, unresolved_names):
     return None
 
 
+def erg_missing_fields(row):
+    """The labels of the fields a row still needs before it can be pushed.
+
+    A power-only test (peak power) needs its watts and nothing else; every other
+    piece needs a distance and a time.
+    """
+    missing = [
+        ERG_FIELD_LABELS[field]
+        for field in ("profile_id", "test_date", "protocol")
+        if row.get(field) in (None, "")
+    ]
+
+    if normalize_protocol(row.get("protocol")) in POWER_ONLY_PROTOCOLS:
+        if pd.isna(pd.to_numeric(row.get("power_w"), errors="coerce")):
+            missing.append(ERG_FIELD_LABELS["power_w"])
+        return missing
+
+    if row.get("distance_m") in (None, ""):
+        missing.append(ERG_FIELD_LABELS["distance_m"])
+    if row.get("time_min") in (None, "") and row.get("time_s") in (None, ""):
+        missing.append("time (min or s)")
+    return missing
+
+
 def finalize_erg_upload_rows(rows, skipped_names=None):
     incomplete = 0
     for i, row in enumerate(rows, start=1):
         row["row_no"] = i
-        required = ["profile_id", "test_date", "protocol", "distance_m"]
-        is_incomplete = any(row.get(field) in (None, "") for field in required)
-        if row.get("time_min") in (None, "") and row.get("time_s") in (None, ""):
-            is_incomplete = True
-        if is_incomplete:
+        if erg_missing_fields(row):
             incomplete += 1
     return rows, incomplete, sorted(set(skipped_names or []))
 
@@ -704,9 +726,13 @@ ERG_ROW_STARTED = "!(" + " && ".join(
 ) + ")"
 
 
+ERG_POWER_ONLY = '{protocol} = "%s"' % PROTOCOL_PEAK_POWER
+ERG_NOT_POWER_ONLY = '{protocol} != "%s"' % PROTOCOL_PEAK_POWER
+
+
 def erg_missing_cell_styles():
     styles = []
-    for field in ("profile_id", "test_date", "protocol", "distance_m"):
+    for field in ("profile_id", "test_date", "protocol"):
         styles.append(
             {
                 "if": {
@@ -718,12 +744,27 @@ def erg_missing_cell_styles():
             }
         )
 
+    # Distance and time are what every piece but peak power is measured by;
+    # peak power is measured by its watts alone.
+    styles.append(
+        {
+            "if": {
+                "filter_query": "%s && %s && {distance_m} is blank"
+                % (ERG_ROW_STARTED, ERG_NOT_POWER_ONLY),
+                "column_id": "distance_m",
+            },
+            "backgroundColor": "#fdecea",
+            "border": "1px solid #f5c2c7",
+        }
+    )
+
     for field in ("time_min", "time_s"):
         styles.append(
             {
                 "if": {
                     "filter_query": (
-                        "%s && {time_min} is blank && {time_s} is blank" % ERG_ROW_STARTED
+                        "%s && %s && {time_min} is blank && {time_s} is blank"
+                        % (ERG_ROW_STARTED, ERG_NOT_POWER_ONLY)
                     ),
                     "column_id": field,
                 },
@@ -731,6 +772,17 @@ def erg_missing_cell_styles():
                 "border": "1px solid #f5c2c7",
             }
         )
+
+    styles.append(
+        {
+            "if": {
+                "filter_query": "%s && {power_w} is blank" % ERG_POWER_ONLY,
+                "column_id": "power_w",
+            },
+            "backgroundColor": "#fdecea",
+            "border": "1px solid #f5c2c7",
+        }
+    )
 
     return styles
 
@@ -1875,7 +1927,8 @@ layout = dbc.Container(
                                 html.Small(
                                     "Times are whole minutes plus the leftover seconds — a 7:12.4 2k is "
                                     "time_min 7, time_s 12.4. A single \"time\" column written as 7:12.4 "
-                                    "works instead. A \"protocol\" column names the piece (2k, 6k, 30min); "
+                                    "works instead. A \"protocol\" column names the piece (2k, 6k, 30min, peak "
+                                    "power — which needs only power_w); "
                                     "leave it out and it is read from the distance and the duration. A wide "
                                     "sheet works too: columns named like \"2000m Erg Power\" or \"6000m Erg "
                                     "Rate\" are split into one row per distance automatically.",
@@ -2028,8 +2081,8 @@ layout = dbc.Container(
                                         ],
                                         tooltip_header={
                                             "profile_id": "Required. Pick from the athlete list.",
-                                            "protocol": "Which piece this is. 2000 m and 6000 m fill in the distance; 30 min fills in the time and you enter the distance rowed.",
-                                            "distance_m": "Required. Prescribed for a 2k or 6k, the distance covered for a 30 min piece.",
+                                            "protocol": "Which piece this is. 2000 m and 6000 m fill in the distance; 30 min fills in the time and you enter the distance rowed. Peak power needs only the power.",
+                                            "distance_m": "Required (except peak power). Prescribed for a 2k or 6k, the distance covered for a 30 min piece.",
                                             "time_min": "Whole minutes only \u2014 7:12.4 is 7 here.",
                                             "time_s": "Leftover seconds \u2014 7:12.4 is 12.4 here.",
                                         },
@@ -3119,13 +3172,7 @@ def submit_erg_records(n_clicks, rows):
             )
             continue
 
-        missing = [
-            ERG_FIELD_LABELS[field]
-            for field in ("profile_id", "test_date", "protocol", "distance_m")
-            if record[field] in (None, "")
-        ]
-        if record["time_min"] in (None, "") and record["time_s"] in (None, ""):
-            missing.append("time (min or s)")
+        missing = erg_missing_fields(record)
         if missing:
             problems.append(f"{label} is missing {', '.join(missing)}")
             continue
@@ -3146,15 +3193,23 @@ def submit_erg_records(n_clicks, rows):
         try:
             record["row_no"] = int(record["row_no"])
             record["profile_id"] = int(record["profile_id"])
-            record["distance_m"] = int(record["distance_m"])
+            power_only = record["protocol"] in POWER_ONLY_PROTOCOLS
+            has_time = record["time_min"] not in (None, "") or record["time_s"] not in (None, "")
+            if record["distance_m"] in (None, "") and power_only:
+                record["distance_m"] = None
+            else:
+                record["distance_m"] = int(record["distance_m"])
             record["stroke_rate_spm"] = coerce_erg_positive_number(record["stroke_rate_spm"])
             record["power_w"] = coerce_erg_positive_number(record["power_w"])
-            record["time_min"], record["time_s"] = normalize_erg_time_parts(
-                time_min=record["time_min"],
-                time_s=record["time_s"],
-            )
-            if record["time_min"] is None or record["time_s"] is None:
-                raise ValueError
+            if has_time or not power_only:
+                record["time_min"], record["time_s"] = normalize_erg_time_parts(
+                    time_min=record["time_min"],
+                    time_s=record["time_s"],
+                )
+                if record["time_min"] is None or record["time_s"] is None:
+                    raise ValueError
+            # A peak power test with no time is stored with the same 0.1
+            # placeholder as any other missing number.
             record["time_min"] = coerce_erg_positive_number(record["time_min"])
             record["time_s"] = coerce_erg_positive_number(record["time_s"])
         except (TypeError, ValueError):

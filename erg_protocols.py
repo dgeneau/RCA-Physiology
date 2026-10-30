@@ -15,6 +15,7 @@ a protocol is called.
 PROTOCOL_2K = "2k"
 PROTOCOL_6K = "6k"
 PROTOCOL_30MIN = "30min"
+PROTOCOL_PEAK_POWER = "peak_power"
 PROTOCOL_CUSTOM = "custom"
 
 # `distance_m` is prescribed for the two time trials and recorded for the timed
@@ -24,6 +25,7 @@ ERG_PROTOCOLS = (
     {"value": PROTOCOL_2K, "label": "2000 m", "distance_m": 2000, "time_min": None},
     {"value": PROTOCOL_6K, "label": "6000 m", "distance_m": 6000, "time_min": None},
     {"value": PROTOCOL_30MIN, "label": "30 min", "distance_m": None, "time_min": 30},
+    {"value": PROTOCOL_PEAK_POWER, "label": "Peak power", "distance_m": None, "time_min": None},
     {"value": PROTOCOL_CUSTOM, "label": "Other", "distance_m": None, "time_min": None},
 )
 
@@ -38,6 +40,11 @@ PROTOCOL_FIXED_TIME_MIN = {
     p["value"]: p["time_min"] for p in ERG_PROTOCOLS if p["time_min"]
 }
 
+# A peak power test is a handful of maximal strokes: the watts are the result
+# and there is no meaningful distance or time to record. These protocols need
+# only a power; distance and time are optional and stored as given.
+POWER_ONLY_PROTOCOLS = frozenset({PROTOCOL_PEAK_POWER})
+
 # What a spreadsheet column might call each one. Compared with case, spaces,
 # underscores and punctuation stripped, the same way the upload headers are.
 PROTOCOL_ALIASES = {
@@ -46,6 +53,9 @@ PROTOCOL_ALIASES = {
     PROTOCOL_30MIN: {
         "30min", "30mins", "30minute", "30minutes", "30minerg", "30minutepiece",
         "thirtymin", "thirtyminute", "30", "30mintest",
+    },
+    PROTOCOL_PEAK_POWER: {
+        "peakpower", "peak", "peakw", "peakwatts", "maxpower", "pp", "peakpowertest",
     },
     PROTOCOL_CUSTOM: {"custom", "other", "misc"},
 }

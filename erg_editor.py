@@ -26,6 +26,7 @@ from auth_setup import auth
 from erg_protocols import (
     ERG_PROTOCOL_OPTIONS,
     ERG_PROTOCOL_VALUES,
+    POWER_ONLY_PROTOCOLS,
     infer_protocol,
     protocol_label,
 )
@@ -477,7 +478,12 @@ def validate_erg_rows(edited_rows):
         if safe_date_str(row.get("test_date")) is None:
             add_issue("test_date", "Test date must be a real date (YYYY-MM-DD).")
 
-        if to_float(row.get("distance_m")) is None:
+        power_only = row.get("protocol") in POWER_ONLY_PROTOCOLS
+
+        if power_only:
+            if to_float(strip_sentinel(row.get("power_w"), "power_w")) is None:
+                add_issue("power_w", "Power is required for a peak power test.")
+        elif to_float(row.get("distance_m")) is None:
             add_issue("distance_m", "Distance is required.")
 
         if row.get("protocol") not in ERG_PROTOCOL_VALUES:
@@ -498,7 +504,7 @@ def validate_erg_rows(edited_rows):
             elif value < low or value > high:
                 add_issue(col, message)
 
-        if erg_total_seconds(row) is None:
+        if erg_total_seconds(row) is None and not power_only:
             add_issue("time_min", "Enter a time as minutes and/or seconds.")
 
     return issues

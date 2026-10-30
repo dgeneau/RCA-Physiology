@@ -9,11 +9,17 @@
     "profile_id",
     "test_date",
     "protocol",
-    "distance_m",
     "power_w",
     "time_min",
     "time_s"
   ],
+  "if": {
+    "properties": { "protocol": { "const": "peak_power" } }
+  },
+  "else": {
+    "required": ["distance_m"],
+    "properties": { "distance_m": { "type": "integer" } }
+  },
   "properties": {
     "row_no": {
       "type": "integer",
@@ -36,14 +42,15 @@
         "2k",
         "6k",
         "30min",
+        "peak_power",
         "custom"
       ],
-      "description": "Which piece this result belongs to. Distance is prescribed for 2k and 6k and is the result for 30min, so this -- not distance_m -- is what groups comparable results. Records written before this field existed are read as 2k or 6k from their distance."
+      "description": "Which piece this result belongs to. Distance is prescribed for 2k and 6k and is the result for 30min, so this -- not distance_m -- is what groups comparable results. peak_power is a short maximal effort measured by power alone, so distance_m may be null and time is the 0.1 placeholder when not recorded. Records written before this field existed are read as 2k or 6k from their distance."
     },
     "distance_m": {
-      "type": "integer",
+      "type": ["integer", "null"],
       "minimum": 1,
-      "description": "Distance in metres: the prescribed distance for a 2k or 6k, the distance covered for a time-capped piece such as 30min."
+      "description": "Distance in metres: the prescribed distance for a 2k or 6k, the distance covered for a time-capped piece such as 30min. Required for every protocol except peak_power, where it is null unless recorded."
     },
     "stroke_rate_spm": {
       "type": "number",

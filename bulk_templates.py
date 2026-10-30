@@ -127,6 +127,11 @@ ERG_TEMPLATE_EXAMPLE_ROWS = (
         "protocol": "2k", "distance_m": 2000, "stroke_rate_spm": 34,
         "power_w": 398, "time_min": 6, "time_s": 8.1,
     },
+    {
+        "athlete": "Sample Athlete-Two", "test_date": "2026-09-15",
+        "protocol": "peak_power", "distance_m": "", "stroke_rate_spm": "",
+        "power_w": 812, "time_min": "", "time_s": "",
+    },
 )
 
 
